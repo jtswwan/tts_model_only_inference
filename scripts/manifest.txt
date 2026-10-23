@@ -12,9 +12,12 @@
 
 # === [reachable] 從推論進入點靜態可達的 .py ===
 # 由 scripts/import_graph.py 的可達性分析產生。
+GPT_SoVITS/AR/__init__.py
+GPT_SoVITS/AR/models/__init__.py
 GPT_SoVITS/AR/models/t2s_lightning_module.py
 GPT_SoVITS/AR/models/t2s_model.py
 GPT_SoVITS/AR/models/utils.py
+GPT_SoVITS/AR/modules/__init__.py
 GPT_SoVITS/AR/modules/activation.py
 GPT_SoVITS/AR/modules/embedding.py
 GPT_SoVITS/AR/modules/lr_schedulers.py
@@ -23,6 +26,7 @@ GPT_SoVITS/AR/modules/patched_mha_with_cache.py
 GPT_SoVITS/AR/modules/scaling.py
 GPT_SoVITS/AR/modules/transformer.py
 GPT_SoVITS/BigVGAN/activations.py
+GPT_SoVITS/BigVGAN/alias_free_activation/torch/__init__.py
 GPT_SoVITS/BigVGAN/alias_free_activation/torch/act.py
 GPT_SoVITS/BigVGAN/alias_free_activation/torch/filter.py
 GPT_SoVITS/BigVGAN/alias_free_activation/torch/resample.py
@@ -32,11 +36,14 @@ GPT_SoVITS/BigVGAN/meldataset.py
 GPT_SoVITS/BigVGAN/utils0.py
 GPT_SoVITS/TTS_infer_pack/TTS.py
 GPT_SoVITS/TTS_infer_pack/TextPreprocessor.py
+GPT_SoVITS/TTS_infer_pack/__init__.py
 GPT_SoVITS/TTS_infer_pack/text_segmentation_method.py
 GPT_SoVITS/f5_tts/model/__init__.py
 GPT_SoVITS/f5_tts/model/backbones/dit.py
 GPT_SoVITS/f5_tts/model/modules.py
+GPT_SoVITS/feature_extractor/__init__.py
 GPT_SoVITS/feature_extractor/cnhubert.py
+GPT_SoVITS/feature_extractor/whisper_enc.py
 GPT_SoVITS/module/__init__.py
 GPT_SoVITS/module/attentions.py
 GPT_SoVITS/module/commons.py
@@ -67,6 +74,7 @@ GPT_SoVITS/text/g2pw/utils.py
 GPT_SoVITS/text/symbols.py
 GPT_SoVITS/text/symbols2.py
 GPT_SoVITS/text/tone_sandhi.py
+GPT_SoVITS/text/zh_normalization/__init__.py
 GPT_SoVITS/text/zh_normalization/char_convert.py
 GPT_SoVITS/text/zh_normalization/chronology.py
 GPT_SoVITS/text/zh_normalization/constants.py
@@ -75,6 +83,7 @@ GPT_SoVITS/text/zh_normalization/phonecode.py
 GPT_SoVITS/text/zh_normalization/quantifier.py
 GPT_SoVITS/text/zh_normalization/text_normlization.py
 GPT_SoVITS/utils.py
+tools/__init__.py
 tools/audio_sr.py
 tools/i18n/i18n.py
 
@@ -82,20 +91,18 @@ tools/i18n/i18n.py
 # 靜態分析不會把 __init__.py 列為可達，但沒有它們 import 會失敗
 # （tools 與 AP_BWE_main 底下的子套件是以絕對名稱 import 的）。
 #
+# feature_extractor/whisper_enc.py 沒有任何東西使用它（可達性分析正確），
+# 但 feature_extractor/__init__.py:1 是
+#     from . import cnhubert, whisper_enc
+# 無條件 import 它，少了它整個套件 import 不起來。它只 import torch，
+# 帶回來不引入任何新依賴。
+#
 # BigVGAN/alias_free_activation/torch/__init__.py 不是空的 —— 它有
 # from .filter / .resample / .act import *。bigvgan.py:19 雖然是直接 import
 # 子模組 act（PEP 420 namespace package 也能解析），但這是實際使用的套件的
 # 標記檔，不帶的風險沒必要承擔。
 # 注意 alias_free_activation/ 本身在 upstream 就沒有 __init__.py（namespace
 # package），BigVGAN/ 也沒有，所以這兩層沒有東西可帶。
-GPT_SoVITS/AR/__init__.py
-GPT_SoVITS/AR/models/__init__.py
-GPT_SoVITS/AR/modules/__init__.py
-GPT_SoVITS/TTS_infer_pack/__init__.py
-GPT_SoVITS/feature_extractor/__init__.py
-GPT_SoVITS/text/zh_normalization/__init__.py
-GPT_SoVITS/BigVGAN/alias_free_activation/torch/__init__.py
-tools/__init__.py
 tools/AP_BWE_main/datasets1/__init__.py
 tools/AP_BWE_main/models/__init__.py
 

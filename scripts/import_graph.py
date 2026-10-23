@@ -93,9 +93,18 @@ def imports_of(path, mod):
                 target = node.module or ""
             if target:
                 required.append(target)
-                # `from X import n` 的 n 可能是子模組也可能只是符號，
-                # 只有真的解析得到檔案時才當成一條邊。
-                optional += [f"{target}.{a.name}" for a in node.names]
+                if node.level and node.module is None:
+                    # `from . import X` —— X 只可能是子模組（或 __init__.py
+                    # 裡定義的名稱，但在 __init__.py 自己裡面就必然是子模組）。
+                    # 列為必要：少了它整個套件 import 不起來。
+                    #
+                    # 這裡原本當成 optional，導致剪掉 feature_extractor/
+                    # whisper_enc.py 後驗證仍然通過，實際執行才炸。
+                    required += [f"{target}.{a.name}" for a in node.names]
+                else:
+                    # `from X import n` 的 n 可能是子模組也可能只是符號，
+                    # 只有真的解析得到檔案時才當成一條邊。
+                    optional += [f"{target}.{a.name}" for a in node.names]
     return required, optional
 
 
@@ -126,8 +135,15 @@ def main():
         for dep in required:
             if dep in DEAD_BRANCHES:
                 continue
-            if dep not in seen:
-                queue.append(dep)
+            # Python 在 import a.b.c 時會先執行 a 與 a.b 的 __init__.py，
+            # 所以祖先套件一律是必要的。少了這一步，走訪會直接跳到子模組
+            # 檔案而不讀套件的 __init__.py —— 而 __init__.py 裡的
+            # `from . import X` 正是會讓整個套件 import 失敗的地方。
+            parts = dep.split(".")
+            for i in range(1, len(parts) + 1):
+                ancestor = ".".join(parts[:i])
+                if ancestor not in DEAD_BRANCHES and ancestor not in seen:
+                    queue.append(ancestor)
         for dep in optional:
             if dep not in seen and resolve(dep, roots):
                 queue.append(dep)

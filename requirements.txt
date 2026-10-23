@@ -15,9 +15,28 @@
 #   huggingface_hub    BigVGAN/bigvgan.py
 #   requests           text/g2pw/onnx_api.py
 
+# --- Python 版本 ---
+# 需要 Python 3.10 ~ 3.12。
+#   上界：numpy<2.0（upstream 的釘選）在 3.13 沒有 wheel —— numpy 要到 2.1
+#         才支援 3.13，所以 3.13 無法同時滿足這個釘選。
+#   另外 jieba_fast 只有 2019 年的 source tarball、完全沒有 wheel，必須就地
+#         編譯 C 擴充；已實測在 3.11 上可編譯通過（jieba_fast 0.39）。
+#         不可改用 jieba 代替：text/chinese2.py:20 硬性要求 jieba_fast，而
+#         兩者分詞結果若有任何差異會改變 word2ph → 改變 BERT 特徵對映 →
+#         改變音訊。
+
 # --- 核心 ---
-torch
-torchaudio
+# torchaudio 的上界是必要的，不是保守起見：
+#   torchaudio 自 2.8/2.9 起把自己的 I/O backend 移除，torchaudio.load()
+#   改為委派給 torchcodec。而 TTS.py:773 的 _get_ref_spec() 就是用
+#   torchaudio.load() 讀參考音訊。
+#   實測：2.7.1 正常；2.11.0 會 ImportError 要求 torchcodec，而 torchcodec
+#   的預編譯 wheel 連結了 CUDA（需要 libnvrtc.so），在純 CPU 機器上載不起來。
+#   upstream 的 requirements.txt 完全沒釘 torchaudio，所以今天全新安裝必壞。
+#
+# 本專案實測通過的組合：torch 2.7.1 + torchaudio 2.7.1（CPU）
+torch>=2.1,<2.9
+torchaudio>=2.1,<2.9
 numpy<2.0
 scipy
 librosa==0.10.2

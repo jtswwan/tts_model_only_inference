@@ -73,6 +73,39 @@ echo ">>> 混語分段用的語言偵測模型"
 get "$VOICE" "GPT-SoVITS/GPT_SoVITS/pretrained_models/fast_langdetect/lid.176.bin" \
              "fast_langdetect/lid.176.bin" || true
 
+echo ">>> 英文前端需要的 nltk 語料"
+# text/english.py:5 用 g2p_en，而 g2p_en 需要 nltk 的 averaged_perceptron_tagger
+# 與 cmudict。這兩個是 nltk 在「第一次使用時」才下載的，所以離線機器上英文
+# 合成會失敗（中文不受影響，走 chinese2 不碰 g2p_en）。這裡預先抓下來。
+if [[ -n "${GSV_SKIP_NLTK:-}" ]]; then
+    echo "  已跳過（GSV_SKIP_NLTK）"
+elif python3 - <<'PYEOF'
+import sys
+try:
+    import nltk
+except ImportError:
+    print("  nltk 未安裝，跳過（只影響英文合成）")
+    sys.exit(0)
+ok = True
+for pkg in ("averaged_perceptron_tagger", "averaged_perceptron_tagger_eng", "cmudict"):
+    try:
+        if nltk.download(pkg, quiet=True):
+            print(f"  已下載        nltk/{pkg}")
+        else:
+            print(f"  失敗          nltk/{pkg}")
+            ok = False
+    except Exception as exc:
+        print(f"  失敗          nltk/{pkg}: {exc}")
+        ok = False
+sys.exit(0 if ok else 1)
+PYEOF
+then :; else
+    echo "  nltk 語料下載未完全成功 —— 中文合成不受影響，英文會失敗。" >&2
+    echo "  若網路受限，可在有網路的機器上執行" >&2
+    echo "    python -c \"import nltk; nltk.download('averaged_perceptron_tagger'); nltk.download('cmudict')\"" >&2
+    echo "  再把 ~/nltk_data 複製過來。" >&2
+fi
+
 echo
 echo ">>> 完成。各目錄體積："
 du -sh "$DEST"/* "$G2PW_DEST" 2>/dev/null | sort -h || true
