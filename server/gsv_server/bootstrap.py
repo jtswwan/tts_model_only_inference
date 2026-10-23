@@ -27,6 +27,10 @@ from pathlib import Path
 # server/ —— 內含 vendored 的 GPT_SoVITS/ 與 tools/
 VENDOR_ROOT = Path(__file__).resolve().parent.parent
 
+# 專案內的 nltk 語料目錄（repo 根的 nltk_data/，可攜版裡是 app/nltk_data/）。
+# 放專案內而不是 ~/nltk_data，可攜版才能整個資料夾搬走還能離線跑英文。
+NLTK_DATA = VENDOR_ROOT.parent / "nltk_data"
+
 _done = False
 
 
@@ -42,6 +46,7 @@ def setup() -> Path:
             " 請先執行 scripts/vendor_upstream.sh。"
         )
 
+    _use_local_nltk_data()
     os.chdir(VENDOR_ROOT)
     for path in (VENDOR_ROOT / "GPT_SoVITS", VENDOR_ROOT):
         entry = str(path)
@@ -50,6 +55,24 @@ def setup() -> Path:
 
     _done = True
     return VENDOR_ROOT
+
+
+def _use_local_nltk_data() -> None:
+    """讓 nltk 先找專案內的 nltk_data/。
+
+    `text/english.py` 透過 g2p_en 需要 nltk 的 cmudict 與
+    averaged_perceptron_tagger。g2p_en 在 import 時會自己 nltk.download()，
+    那表示：離線機器上英文合成會失敗，而有網路時第一個英文請求會在請求路徑上
+    下載語料 —— 兩者都不能接受。
+
+    nltk 在 import 時讀 NLTK_DATA（os.pathsep 分隔），所以這裡必須在
+    import nltk 之前執行。使用者已設的值保留在後面，不覆蓋。
+    """
+    existing = os.environ.get("NLTK_DATA", "")
+    entry = str(NLTK_DATA)
+    parts = [p for p in existing.split(os.pathsep) if p]
+    if entry not in parts:
+        os.environ["NLTK_DATA"] = os.pathsep.join([entry, *parts])
 
 
 def require_setup() -> None:

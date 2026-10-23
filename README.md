@@ -91,6 +91,26 @@ python3 scripts/start.py --setup-only       # 只建環境
 python3 scripts/start.py --download-only    # 只下載權重
 ```
 
+### Colab：不想在本機裝任何東西
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/jtswwan/tts_model_only_inference/blob/claude/blissful-hawking-safc6x/Colab.ipynb)
+
+沒有 GPU、或只想先聽聽效果的話用這個。Colab 的 T4 是免費的，而這個專案要的就是 GPU。
+
+`Colab.ipynb` 由 `scripts/make_colab.py` 產生（**不要直接改 .ipynb** —— 改產生器再重跑，見 §10）。
+整本從上到下執行即可，會依序：檢查 GPU → clone → 處理 torchaudio 相容性 → 裝其餘套件 →
+下載權重與 nltk 語料 → 啟動 server → 用 Colab 的 port proxy 開出控制台 → 跑一輪 TTFA 量測並直接在 notebook 裡播放結果。
+
+兩件 Colab 特有的事值得知道：
+
+- **torchaudio**：Colab 預裝的 torch 版本會變。notebook 先**實測** `torchaudio.load` 能不能讀 wav
+  （而不是比對版本號），不行才依序試 `torchcodec` → 降級到 `<2.9`。詳見地雷 1。
+- **numpy**：upstream 釘 `numpy<2.0`。如果 Colab 當下是 2.x，pip 會降級它，而**已經 import 過的 numpy 不會換掉**
+  —— notebook 會偵測並提示你重新啟動執行階段。
+
+產生器自己會把每個 code cell 編譯一次才寫出檔案。因為 cell 的原始碼是「Python 字串裡再放 Python」，
+跳脫少一層就會把字串截斷，而那種錯只有在 Colab 上執行到那一格才會爆。
+
 ### 可攜版：解壓縮就能用
 
 不想處理環境的話，用這個。產出的資料夾**自帶 Python、自帶套件、自帶權重**，目標機器不需要安裝 Python、不需要 pip、不需要網路。
@@ -107,6 +127,7 @@ python3 scripts/make_bundle.py --out gsv-portable --archive    # 另外產生 ta
 gsv-portable/
   python/      自帶的 CPython 與所有套件
   app/         程式碼與模型權重
+    nltk_data/ 英文前端的 nltk 語料（少了它，含英文的句子會失敗）
   啟動.sh / 啟動.bat
   README.txt
 ```
@@ -133,6 +154,7 @@ CPU 版實測 **4.91 GB**（Python 與套件 2.04 GB + 程式碼與權重 2.87 G
 |---|---|---|
 | `git clone` | **約 26 MB** | 其中 17.3 MB 是中英文前端詞典（`cmudict` 7 MB、`engdict_cache` 5.7 MB、`polyphonic` 2.9 MB）。程式碼本身不到 1 MB |
 | 模型權重 | **約 2.85 GB** | BERT 1.3 G、G2PW 608 M、CNHubert 361 M、洛神 GPT 149 M + SoVITS 129 M、fast_langdetect 126 M、SV 103 M |
+| nltk 語料 | **約 20 MB** | 英文前端要的 `cmudict` 與 `averaged_perceptron_tagger`，下載到專案內的 `nltk_data/` |
 | 虛擬環境（CPU） | **約 1.8 GB** | 實測值 |
 | 虛擬環境（CUDA） | 較大 | torch 的 CUDA wheel 另外會拉 `nvidia-*` 相依套件；裝完後控制台會顯示實際佔用 |
 
@@ -810,6 +832,7 @@ python scripts/add_voice.py --name 新角色 \
 |---|---|
 | `set_ref_audio` → `prompt_semantic`、`refer_spec` | CNHubert 前向、音檔 I/O、重採樣 |
 | 第一次 `compute_embedding3` | SV 聲紋，CPU 實測 826 ms／段（見 §5.7） |
+| 英文前端（丟棄式 `clean_text("warm up", "en")`） | `g2p_en` 的 `cmudict` 解析與 tagger 載入，**CPU 實測 6.39 s → 6 ms** |
 | dummy 推論 | CUDA/MKL kernel、onnxruntime session、jieba 詞典的一次性成本 |
 
 CPU 實測：`/model` 約 24 s、`/reference` 約 5 s。暖機**假設你給的東西是對的** —— 驗證是 `add_voice.py` 與 `preflight()` 的工作，不是暖機的。
@@ -974,9 +997,18 @@ preflight 把這兩種情況都變成 **HTTP 400**，並附上可行動的訊息
 
 另外 `jieba_fast` 只有 2019 年的 source tarball、**完全沒有 wheel**，必須就地編譯 C 擴充（已實測在 3.11 可編譯通過，版本 0.39）。不可改用 `jieba` 代替：`text/chinese2.py:20` 硬性要求 `jieba_fast`，而兩者分詞若有任何差異會改變 `word2ph` → 改變 BERT 特徵對映 → **改變音訊**。
 
-**3. 英文需要 nltk 語料** —— `text/english.py:5` 用 `g2p_en`，它需要 nltk 的 `averaged_perceptron_tagger` 與 `cmudict`，而那是**第一次使用時才下載**的。離線機器上英文合成會失敗（中文不受影響，走 `chinese2` 不碰 `g2p_en`）。
+**3. 英文需要 nltk 語料** —— `text/english.py:5` 用 `g2p_en`，它需要 nltk 的 `averaged_perceptron_tagger` 與 `cmudict`，而那是**第一次使用時才下載**的。中文不受影響（走 `chinese2` 完全不碰 `g2p_en`，已實測：把語料移走後純中文的 `clean_text` 照樣過）。
 
-→ `scripts/fetch_models.sh` 已加入預抓；失敗時會印出如何在有網路的機器上抓好再複製 `~/nltk_data`。
+這件事有三個後果，一個比一個不明顯：
+
+1. **離線機器上英文合成會失敗。**
+2. **可攜版會壞。** `nltk.download()` 預設寫 `~/nltk_data`，那在可攜資料夾外面 —— 整包搬到目標機器後英文就沒了。
+   → 改成下載到專案內的 `nltk_data/`，由 `bootstrap.py` 的 `_use_local_nltk_data()` 在 import nltk 之前設好 `NLTK_DATA`；`make_bundle.py` 也會把它複製進可攜版。
+3. **失敗的樣子完全看不出原因。** `/tts/stream` 是 chunked 串流，HTTP 200 早就送出去了，所以錯誤發生在串流「中途」——
+   客戶端只拿到 `http.client.IncompleteRead(0 bytes read)`。這個 bug 就是這樣浮現的：純中文都好，只有含英文的句子會斷。
+   → `engine.english_frontend_ready()` 在啟動時就查一次並警告，`/health` 的 `english_ready` 也看得到。
+
+→ `scripts/fetch_models.sh`（與 `scripts/start.py --download-only`）會一併抓好這兩份語料（約 20 MB）。
 
 ### 一併修正
 
@@ -1011,6 +1043,8 @@ preflight 把這兩種情況都變成 **HTTP 400**，並附上可行動的訊息
 ```
 start.sh / start.bat      一鍵啟動（雙擊即可）
 requirements.txt          由 import 圖掃出，非從 upstream 抄改
+Colab.ipynb               產生物 —— 要改請改 scripts/make_colab.py
+nltk_data/                英文前端的 nltk 語料（下載而來，不進 git）
 
 server/
   config.yaml             設定；可用 GSV_* 環境變數覆寫
@@ -1034,10 +1068,13 @@ scripts/
   manifest.txt            vendored 檔案的唯一真實清單（每組都寫明理由）
   vendor_upstream.sh      依 manifest 複製；清單中的路徑不存在就中止
   import_graph.py         可達性分析 / 斷鏈驗證 / --manifest 重新產生清單
-  fetch_models.sh         下載權重（只抓 PyTorch 格式）
+  fetch_models.sh         下載權重（只抓 PyTorch 格式）與英文 nltk 語料
+  make_colab.py           產生 Colab.ipynb（寫出前會先編譯每個 code cell）
   verify_equivalence.py   實測等價優化是否真的等價（需 GPU）
   bench.py                量 TTFA（只用標準庫）
 ```
+
+`Colab.ipynb` 是**產生物**。notebook 的 JSON 很難讀也很難 review，而且手改之後下次重跑產生器就被蓋掉，所以唯一的真實來源是 `scripts/make_colab.py`。
 
 `server/GPT_SoVITS/` 與 `server/tools/` 底下的檔案**一律不修改**。需要改變行為時，一律在 `gsv_server/` 這一層處理（例如工作目錄、BERT 替換、快取包裝），而不是去動 upstream 的程式碼。這是為了讓 upstream 更新時能直接重跑 `vendor_upstream.sh` 而不需要重新 rebase 任何修改。
 
@@ -1057,8 +1094,9 @@ scripts/
 |---|---|
 | 模型載入 | 21.4 s |
 | `set_ref_audio`（參考張量預算） | 2.3 s |
+| 英文前端暖機 | 4.0 s |
 | dummy 暖機 | 11.9 s |
-| **合計** | **37.0 s** |
+| **合計** | **41.0 s** |
 
 **合成**（`profile=quality`、`cut1`、取樣參數 5/1/1）
 
@@ -1066,6 +1104,9 @@ scripts/
 |---|---|---|---|---|
 | 8 字 | 2565 ms | 2.87 s | 1.74 s | **0.607×** |
 | 26 字 | 6068 ms | 6.44 s | 5.14 s | **0.799×** |
+| 44 字（中英混合） | 6102 ms | 6.58 s | 4.94 s | **0.751×** |
+
+中英混合那列是有意義的：它的 TTFA **低於**同批的 26 字純中文句（6595 ms），說明英文前端那 6.39 s 的一次性成本已經在暖機時付掉，沒有落在第一個含英文的請求上。沒有這個暖機步驟時，第一個含拉丁字母的句子 TTFA 會多出 6 秒以上。
 
 AR 解碼速率約 45 token/s（4 核）。v2Pro 的 semantic frame rate 是 25 Hz，所以每秒音訊需要 25 個 token → 約 0.55 s 的計算。
 

@@ -98,6 +98,7 @@ class Latency:
     # 等價優化（README §4 類別一），預設開啟
     trim_bert: bool = True
     warmup_dummy_run: bool = True
+    warmup_english_frontend: bool = True
     text_cache_size: int = 512
 
 

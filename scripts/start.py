@@ -75,6 +75,8 @@ FILES.append((VOICE, "GPT-SoVITS/GPT_SoVITS/pretrained_models/fast_langdetect/li
 
 # 少了這些檔案英文會失敗（中文不受影響，走 chinese2 不碰 g2p_en）
 NLTK = ("averaged_perceptron_tagger", "averaged_perceptron_tagger_eng", "cmudict")
+# 和 server/gsv_server/bootstrap.py 的 NLTK_DATA 必須一致
+NLTK_DIR = REPO / "nltk_data"
 
 STEPS = [
     ("python", "檢查 Python 版本"),
@@ -397,13 +399,17 @@ def step_weights() -> None:
     set_step("weights", "done", human(size))
 
 
-def step_nltk(vpy: Path) -> None:
+def step_nltk(vpy: Path | None = None) -> None:
     set_step("nltk", "running")
+    # --download-only 時可能還沒有 venv，退回當前 python
+    py = str(vpy) if vpy is not None and vpy.exists() else sys.executable
+    # 下載到專案內的 nltk_data/，不是 ~/nltk_data —— 可攜版才搬得走
     code = ("import nltk,sys\n"
             f"pkgs={NLTK!r}\n"
-            "ok=all(nltk.download(p, quiet=True) for p in pkgs)\n"
+            f"d={str(NLTK_DIR)!r}\n"
+            "ok=all(nltk.download(p, download_dir=d, quiet=True) for p in pkgs)\n"
             "sys.exit(0 if ok else 1)\n")
-    rc = subprocess.run([str(vpy), "-c", code], capture_output=True, text=True).returncode
+    rc = subprocess.run([py, "-c", code], capture_output=True, text=True).returncode
     if rc == 0:
         set_step("nltk", "done", "已就緒")
     else:
@@ -411,7 +417,7 @@ def step_nltk(vpy: Path) -> None:
         set_step("nltk", "done", "下載失敗 — 只影響英文合成，中文不受影響")
         log("nltk 語料下載失敗。中文合成不受影響；英文需要在有網路的機器上執行")
         log("  python -c \"import nltk; nltk.download('averaged_perceptron_tagger'); nltk.download('cmudict')\"")
-        log("  再把 ~/nltk_data 複製過來。")
+        log(f"  再把下載好的 nltk_data 複製到 {NLTK_DIR}。")
 
 
 def wait_port(port: int, timeout: float) -> bool:
@@ -442,9 +448,11 @@ def main() -> int:
     if args.download_only:
         try:
             step_weights()
+            step_nltk(venv_python())
             for st in STATUS["steps"]:
-                if st["id"] == "weights":
-                    print(f"權重：{st['detail']}")
+                if st["id"] in ("weights", "nltk"):
+                    label = "權重" if st["id"] == "weights" else "英文語料"
+                    print(f"{label}：{st['detail']}")
             return 0
         except Exception as exc:
             print(f"失敗: {exc}", file=sys.stderr)

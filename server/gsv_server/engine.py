@@ -43,6 +43,37 @@ class PreflightError(ValueError):
     """設定在載入模型之前就被判定不可用。"""
 
 
+# g2p_en 需要的 nltk 語料。nltk>=3.9 的 pos_tag 改用 *_eng 那份，
+# 舊版用沒後綴的，所以兩個擇一即可。
+_NLTK_NEEDED = (
+    ("corpora/cmudict", "corpora/cmudict.zip/cmudict/"),
+    ("taggers/averaged_perceptron_tagger_eng", "taggers/averaged_perceptron_tagger"),
+)
+
+
+def english_frontend_ready() -> bool:
+    """檢查英文前端要的 nltk 語料在不在。
+
+    缺的時候不該讓 server 起不來 —— 中文合成完全不受影響。但也不該等到
+    串流中途才爆（客戶端只會看到 IncompleteRead，查不出原因），所以在
+    啟動時就查一次並講清楚。
+    """
+    try:
+        import nltk.data
+    except Exception:  # noqa: BLE001
+        return False
+    for alternatives in _NLTK_NEEDED:
+        for name in alternatives:
+            try:
+                nltk.data.find(name)
+                break
+            except Exception:  # noqa: BLE001, PERF203
+                continue
+        else:
+            return False
+    return True
+
+
 def preflight(settings: Settings) -> dict[str, Any]:
     """在建構 TTS 之前把能查的都查完，有問題大聲失敗。
 
@@ -106,6 +137,17 @@ def preflight(settings: Settings) -> dict[str, Any]:
                     )
         except Exception as exc:  # noqa: BLE001
             problems.append(f"無法判定 {settings.models.vits} 的版本: {type(exc).__name__}: {exc}")
+
+    detected["english_ready"] = english_frontend_ready()
+    if not detected["english_ready"]:
+        from . import bootstrap as _bs
+
+        log.warning(
+            "找不到英文前端要的 nltk 語料（cmudict / averaged_perceptron_tagger）。"
+            " 中文合成不受影響，但含英文或數字的請求會失敗。"
+            " 執行 scripts/fetch_models.sh 下載到 %s。",
+            _bs.NLTK_DATA,
+        )
 
     if problems:
         raise PreflightError("設定無法使用：\n  - " + "\n  - ".join(problems))
@@ -383,6 +425,11 @@ class Engine:
         self.tts.set_ref_audio(self.settings.resolve(ref.audio))
         timings["set_ref_audio"] = time.perf_counter() - t0
 
+        if self.settings.latency.warmup_english_frontend:
+            t0 = time.perf_counter()
+            self._warm_english_frontend()
+            timings["english_frontend"] = time.perf_counter() - t0
+
         if self.settings.latency.warmup_dummy_run:
             # 第一次真實推論會付掉 CUDA kernel、cuDNN autotune、onnxruntime
             # session 初始化、jieba 詞典載入等一次性成本。在這裡付掉，
@@ -395,6 +442,32 @@ class Engine:
         self.warm = True
         log.info("暖機完成：%s", {k: round(v, 3) for k, v in timings.items()})
         return timings
+
+    def _warm_english_frontend(self) -> None:
+        """付掉英文前端的一次性初始化成本。
+
+        `text/english.py:360` 在模組層級執行 `_g2p = en_G2p()`，那會解析
+        `cmudict`（nltk 語料）與 `cmudict.rep`；`pos_tag` 第一次呼叫還要載入
+        averaged_perceptron_tagger。實測第一次 6.39s，之後 6ms。
+
+        暖機用的文本是純中文（`"暖機。"`），走 chinese2 完全不碰 g2p_en，
+        所以這筆成本原本會落在「第一個含拉丁字母的請求」上 —— 而那正是
+        使用者唯一在意的 TTFA。這裡丟一次即棄的呼叫把它付掉。
+
+        結果被丟掉，只是為了填模組層級的快取，不影響任何輸出。
+        """
+        from text.cleaner import clean_text
+
+        try:
+            clean_text("warm up", "en", self.config.version)
+        except Exception as exc:  # noqa: BLE001
+            # 缺 nltk 語料時這裡會失敗。不讓它擋住啟動 —— 中文合成不受影響，
+            # 但要講清楚英文會在請求路徑上失敗，而不是等到串流中途才爆。
+            log.warning(
+                "英文前端暖機失敗：%s。中文合成不受影響，但含英文的請求會失敗。"
+                " 請執行 scripts/fetch_models.sh 或 python scripts/start.py 補上 nltk 語料。",
+                exc,
+            )
 
     def set_reference(self) -> dict[str, float]:
         """換掉參考音訊並重新暖機。
@@ -583,6 +656,7 @@ class Engine:
         s = self.settings
         return {
             "warm": self.warm,
+            "english_ready": english_frontend_ready(),
             "version": self.config.version,
             "device": str(self.config.device),
             "is_half": self.config.is_half,

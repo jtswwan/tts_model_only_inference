@@ -27,6 +27,10 @@ output/
 hdr*.txt
 samples/
 
+# nltk 語料（約 20 MB，由 scripts/fetch_models.sh 下載）
+nltk_data
+nltk_data/
+
 # 本機虛擬環境（start.py 建在這裡）
 # 不帶斜線：帶斜線只匹配目錄，而它也可能是指向別處的 symlink
 .venv

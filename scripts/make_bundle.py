@@ -262,6 +262,13 @@ def main() -> int:
     # server/ 底下的權重很大，用硬連結（同一檔案系統才行，tar 時會實體化）
     copy_tree(REPO / "server", app / "server", link=not args.copy)
     copy_tree(REPO / "scripts", app / "scripts", link=False)
+    # 英文前端要的 nltk 語料。放進可攜版，解壓後離線也能念英文
+    # （bootstrap.py 會把 NLTK_DATA 指到 app/nltk_data/）。
+    if (REPO / "nltk_data").is_dir():
+        copy_tree(REPO / "nltk_data", app / "nltk_data", link=not args.copy)
+    else:
+        print(f"  {WARN} 找不到 {REPO / 'nltk_data'} —— 可攜版將無法合成英文。"
+              f"先執行 scripts/fetch_models.sh")
     for f in ("requirements.txt", "README.md"):
         shutil.copy2(REPO / f, app / f)
     if args.no_weights:
