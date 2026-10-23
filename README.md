@@ -91,6 +91,42 @@ python3 scripts/start.py --setup-only       # 只建環境
 python3 scripts/start.py --download-only    # 只下載權重
 ```
 
+### 可攜版：解壓縮就能用
+
+不想處理環境的話，用這個。產出的資料夾**自帶 Python、自帶套件、自帶權重**，目標機器不需要安裝 Python、不需要 pip、不需要網路。
+
+```bash
+python3 scripts/make_bundle.py --out gsv-portable              # CPU 版
+python3 scripts/make_bundle.py --out gsv-portable --cuda cu121 # GPU 版
+python3 scripts/make_bundle.py --out gsv-portable --archive    # 另外產生 tar.gz
+```
+
+複製整個資料夾到目標機器，執行 `啟動.sh`（或 `啟動.bat`）即可。
+
+```
+gsv-portable/
+  python/      自帶的 CPython 與所有套件
+  app/         程式碼與模型權重
+  啟動.sh / 啟動.bat
+  README.txt
+```
+
+CPU 版實測 **4.91 GB**（Python 與套件 2.04 GB + 程式碼與權重 2.87 GB），建置約 13 秒（套件已快取時）。
+
+**為什麼不用一般的 venv**：venv 的 `pyvenv.cfg` 與 script 的 shebang 都寫絕對路徑，搬家就壞。這裡用 python-build-standalone（透過 `uv` 取得），它設計上可重定位，套件直接裝進它自己的 `site-packages` 而不是 venv。
+
+**為什麼不用 PyInstaller 打成單一執行檔**：PyTorch 有大量 `.so` 與資料檔，打成單檔會是 2–3 GB 的執行檔、啟動時要解壓到暫存目錄，而且 torch 的動態載入常常打包失敗。一個資料夾更可靠也更好除錯。
+
+實測（建置後搬到完全不同的路徑再執行）：
+
+| | |
+|---|---|
+| `./啟動.sh` | 56 秒就緒 |
+| `/health` | `ready=true`、`quality.clean=true` |
+| 合成 | TTFA 3581 ms、2.50 s 音訊 |
+| 用的直譯器 | bundle 自帶的 Python 3.11.15 / torch 2.8.0+cpu |
+| console script | `pip` / `isympy` / `ttx` 搬家後仍可執行 |
+
 ### 需要多少空間
 
 | 項目 | 大小 | 說明 |
@@ -992,6 +1028,7 @@ server/
 
 scripts/
   start.py                一鍵啟動：建環境 → 下載權重 → 啟動 server → 開控制台
+  make_bundle.py          打包成解壓縮即可用的可攜版（自帶 Python 與權重）
   add_voice.py            裝一組新的模型 + 參考音訊（檢查、放檔、產生設定）
   prepare.py              離線剪裁 BERT 等啟動時間優化（選用）
   manifest.txt            vendored 檔案的唯一真實清單（每組都寫明理由）
