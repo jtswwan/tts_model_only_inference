@@ -1,0 +1,20 @@
+# 自訂英文發音 —— 本專案自己的檔案，不是 vendored upstream
+#
+# 為什麼需要這個檔案：
+#   text/english.py:322 的 qryword() 對「不在字典裡、長度 <= 3」的詞一律
+#   逐字母拼讀。那對縮寫是對的（GPU 唸 G-P-U、PNG 唸 P-N-G），但對剛好能
+#   當單字唸的詞就錯了 —— "wav" 會被唸成 "double-u ay vee"。
+#
+# 為什麼不直接改 GPT_SoVITS/text/engdict-hot.rep：
+#   那是 vendored upstream 檔案，scripts/vendor_upstream.sh 會依 manifest
+#   重新複製，手改會被蓋掉。這個檔案在 vendored 樹之外，不會。
+#
+# 格式（和 upstream 的 engdict-hot.rep 相同）：
+#   單字 大寫 ARPAbet 音素，空白分隔。重音用數字 0/1/2 標在母音後面。
+#   音素必須是 text/symbols2.py 裡有的 —— 不是的話載入時會明確失敗，
+#   而不是像 replace_phs() 那樣靜默丟掉。
+#
+# 改完要重啟 server（或呼叫 /model）才會生效。
+# 想確認某個詞現在怎麼唸：python3 scripts/check_en.py wav
+
+WAV W EY1 V

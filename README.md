@@ -837,6 +837,49 @@ python scripts/add_voice.py --name 新角色 \
 
 CPU 實測：`/model` 約 24 s、`/reference` 約 5 s。暖機**假設你給的東西是對的** —— 驗證是 `add_voice.py` 與 `preflight()` 的工作，不是暖機的。
 
+#### 修英文發音
+
+`text/english.py:322` 的 `qryword()` 對「不在 cmudict 裡、長度 <= 3」的詞**一律逐字母拼讀**：
+
+```python
+# oov 长度小于等于 3 直接读字母
+if len(word) <= 3:
+```
+
+對縮寫這是對的，對剛好能當單字唸的詞就錯了。實測：
+
+| 詞 | upstream 的音素 | 聽起來 | 對不對 |
+|---|---|---|---|
+| `wav` | `D AH1 B AH0 L Y UW0 EY1 V IY1` | "double-u ay vee" | **錯** |
+| `gpu` | `JH IY1 P IY1 Y UW1` | "G-P-U" | 對 |
+| `png` | `P IY1 EH1 N JH IY1` | "P-N-G" | 對 |
+| `hz` | `HH ER1 T Z` | "hertz" | 對（在字典裡） |
+| `vs` | `V ER1 S AH0 Z` | "versus" | 對（在字典裡） |
+
+掃過 30 幾個這個專案會用到的短詞，**只有 `wav` 是真的錯**。所以不做大規模改字典，只修確定錯的。
+
+**怎麼修**：加一行到 `server/pronunciation.rep`，重啟 server。
+
+```
+WAV W EY1 V
+```
+
+查某個詞現在怎麼唸：
+
+```bash
+python3 scripts/check_en.py wav gpu api      # 逐字母拼讀的會被標出來
+python3 scripts/check_en.py "the wav file"   # 整句
+python3 scripts/check_en.py --no-custom wav  # 看 upstream 原本的結果
+```
+
+**為什麼不直接改 `text/engdict-hot.rep`**：upstream 自己留了那個熱修字典（裡面已經有 CHATGPT、JSON、CONDA），`get_dict()` 會在讀完 cache 之後無條件套用。但它在 vendored 樹裡、被 `manifest.txt` 管著，`vendor_upstream.sh` 會重新複製，手改會被蓋掉。所以 `pronunciation.py` 用同樣的手法（覆寫 `_g2p.cmu` 的條目），資料放在 vendored 樹之外，upstream 一個字都不用改。
+
+**為什麼載入時一定要驗證**：`replace_phs()`（english.py:111-121）對不在 `symbols` 裡的音素是**靜默丟掉**的，只 print 一行。所以一個打錯的音素不會報錯，只會讓那個字少一個音。`pronunciation.validate()` 在 `preflight()` 就擋掉，並指名是哪個字的哪個音素。
+
+**這會改變輸出**，所以它算 §4 的「刻意偏離」—— `/health` 的 `custom_pronunciations` 會列出所有生效的詞，不會悄悄改。
+
+**但發音不是英文品質的主因**：洛神的參考音訊是**純中文**（`我想，你们不必担忧我们的成长…`），SoVITS 也是中文語料訓練的。所以英文會帶中文口音，這是模型與參考音訊的限制，不是 G2P 能修的。想要好的英文需要英文或雙語的參考音訊 + 對應模型（用 `scripts/add_voice.py` 裝）。
+
 ### 6.2 換模型與換參考音訊
 
 兩個操作都是**先驗證、通過才動**，失敗時舊狀態完全不受影響。
@@ -1048,12 +1091,14 @@ nltk_data/                英文前端的 nltk 語料（下載而來，不進 gi
 
 server/
   config.yaml             設定；可用 GSV_* 環境變數覆寫
+  pronunciation.rep       自訂英文發音（本專案的檔案，不是 vendored）
   GPT_SoVITS/             vendored upstream —— 原封不動，不改
   tools/                  vendored upstream —— 原封不動，不改
   gsv_server/             本專案自己的程式碼
     bootstrap.py          建立 upstream 預期的 sys.path 與工作目錄
     settings.py           設定載入與驗證
     bert_trim.py          BERT 等價剪裁
+    pronunciation.py      自訂英文發音的載入、驗證與套用
     engine.py             暖機、快取、量測、GPU 操作序列化
     api.py                HTTP + WebSocket
     console.html          網頁控制台（單一檔、零外部依賴）
@@ -1072,6 +1117,7 @@ scripts/
   make_colab.py           產生 Colab.ipynb（寫出前會先編譯每個 code cell）
   verify_equivalence.py   實測等價優化是否真的等價（需 GPU）
   bench.py                量 TTFA（只用標準庫）
+  check_en.py             查某個英文詞實際會被唸成什麼音素
 ```
 
 `Colab.ipynb` 是**產生物**。notebook 的 JSON 很難讀也很難 review，而且手改之後下次重跑產生器就被蓋掉，所以唯一的真實來源是 `scripts/make_colab.py`。

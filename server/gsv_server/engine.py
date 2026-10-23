@@ -24,6 +24,7 @@ from . import bootstrap
 bootstrap.setup()
 
 from . import bert_trim  # noqa: E402
+from . import pronunciation  # noqa: E402
 from .settings import Settings  # noqa: E402
 
 from TTS_infer_pack.TTS import TTS, TTS_Config  # noqa: E402
@@ -137,6 +138,14 @@ def preflight(settings: Settings) -> dict[str, Any]:
                     )
         except Exception as exc:  # noqa: BLE001
             problems.append(f"無法判定 {settings.models.vits} 的版本: {type(exc).__name__}: {exc}")
+
+    # 自訂發音檔壞掉要當場失敗。replace_phs() 對不認識的音素是靜默丟掉的，
+    # 所以放過一個打錯的音素，結果是那個字少一個音而且沒有任何錯誤訊息。
+    try:
+        detected["custom_pronunciations"] = sorted(pronunciation.load())
+    except pronunciation.PronunciationError as exc:
+        problems.append(str(exc))
+        detected["custom_pronunciations"] = []
 
     detected["english_ready"] = english_frontend_ready()
     if not detected["english_ready"]:
@@ -308,9 +317,13 @@ class Engine:
         self.requests_total = 0
         self.audio_seconds_total = 0.0
 
+        # preflight() 已經讀過並驗證過了，這裡沿用同一份，不重讀檔案
+        self.custom_pronunciations: dict[str, list[str]] = {}
+
         self.detected = preflight(settings)
         if self.detected:
             log.info("SoVITS 檔頭判定: %s", self.detected)
+        self.custom_pronunciations = pronunciation.load()
 
         t0 = time.perf_counter()
         self.config = _build_tts_config(settings)
@@ -460,6 +473,10 @@ class Engine:
 
         try:
             clean_text("warm up", "en", self.config.version)
+            # text.english 這時才真的被 import 進來，_g2p 也才存在，
+            # 所以自訂發音要在這之後才套用得上。檔案本身在 preflight()
+            # 就驗證過了，這裡只負責合併。
+            pronunciation.apply(self.custom_pronunciations)
         except Exception as exc:  # noqa: BLE001
             # 缺 nltk 語料時這裡會失敗。不讓它擋住啟動 —— 中文合成不受影響，
             # 但要講清楚英文會在請求路徑上失敗，而不是等到串流中途才爆。
@@ -657,6 +674,7 @@ class Engine:
         return {
             "warm": self.warm,
             "english_ready": english_frontend_ready(),
+            "custom_pronunciations": sorted(self.custom_pronunciations),
             "version": self.config.version,
             "device": str(self.config.device),
             "is_half": self.config.is_half,
