@@ -105,6 +105,11 @@ class Latency:
     # 這會改變輸出音訊，所以算 §4 的刻意偏離，會列在 /health 的 quality 裡。
     max_language_gap_ms: int = 0
 
+    # 中英混雜時，讓中文的 BERT 看得到整句，而不是被英文切成好幾段各看各的。
+    # 這會改變 BERT 特徵（也可能因為斷詞跨界而改變中文音素），所以預設關閉，
+    # 開啟時列在 /health 的 quality.deviations。
+    zh_full_sentence_bert: bool = False
+
     trim_bert: bool = True
     warmup_dummy_run: bool = True
     warmup_english_frontend: bool = True

@@ -25,6 +25,7 @@ bootstrap.setup()
 
 from . import bert_trim  # noqa: E402
 from . import gaptrim  # noqa: E402
+from . import zh_context  # noqa: E402
 from . import pronunciation  # noqa: E402
 from .settings import Settings  # noqa: E402
 
@@ -457,6 +458,12 @@ class Engine:
                 "TTS.py:1027 自評為 Medium quality，且會強制 parallel_infer=False "
                 "使 AR 改走 infer_panel_naive（另一條程式碼路徑）"
             )
+        if lat.zh_full_sentence_bert:
+            notes.append(
+                "latency.zh_full_sentence_bert=true：中英混雜時中文的 BERT 改成"
+                "看整句（upstream 是被英文切成好幾段各看各的）。BERT 特徵會變，"
+                "斷詞與變調也可能跨越原本的片段邊界"
+            )
         if lat.max_language_gap_ms > 0:
             notes.append(
                 f"latency.max_language_gap_ms={lat.max_language_gap_ms}："
@@ -514,6 +521,14 @@ class Engine:
             t0 = time.perf_counter()
             self._warm_english_frontend()
             timings["english_frontend"] = time.perf_counter() - t0
+
+        if self.settings.latency.zh_full_sentence_bert:
+            # 包住 get_phones_and_bert，並在 preprocessor 上掛旗標。
+            # 掛旗標而不是全域開關，是為了讓同一個 process 裡換設定時能跟著變。
+            zh_context.install()
+            self.tts.text_preprocessor._gsv_zh_context = True
+        elif hasattr(self.tts.text_preprocessor, "_gsv_zh_context"):
+            self.tts.text_preprocessor._gsv_zh_context = False
 
         t0 = time.perf_counter()
         self._apply_custom_pronunciations()
@@ -688,8 +703,10 @@ class Engine:
         # 回文字位置。
         gap_ms = self.settings.latency.max_language_gap_ms
         source = self._run(inputs)
-        if gap_ms > 0 and gaptrim.has_language_switch_without_punct(text):
-            source = gaptrim.limit_stream(source, gap_ms)
+        if gap_ms > 0:
+            kinds = gaptrim.boundaries(text)
+            if any(k == "zh2en" for k in kinds):
+                source = gaptrim.limit_stream(source, gap_ms, kinds)
 
         with self._lock:
             start = time.perf_counter()

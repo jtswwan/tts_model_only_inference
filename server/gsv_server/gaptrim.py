@@ -43,20 +43,39 @@ log = logging.getLogger("gsv.gaptrim")
 PAUSE_PUNCT = set("，。！？；：、,.!?;:\n…—")
 
 
-def has_language_switch_without_punct(text: str) -> bool:
-    """文字裡有中英邊界，而且中間沒有停頓標點。"""
+def boundaries(text: str) -> list[str]:
+    """回傳句中語言邊界的型別，依出現順序。
+
+    `"zh2en"`（中文後面接英文）或 `"en2zh"`（英文後面接中文）。
+
+    為什麼要分：中文講到一半要切進英文時，那個停頓是模型在猶豫，不該有；
+    但講完一個英文詞再回到中文，稍微頓一下是自然的。所以只消 zh2en。
+
+    句中有停頓標點時回空的 —— 那些停頓是該有的，而且沒辦法把音訊上的
+    gap 可靠地對應回文字位置。
+    """
     from text.LangSegmenter import LangSegmenter
 
-    if any(ch in PAUSE_PUNCT for ch in text.strip()[:-1]):
+    stripped = text.strip()
+    if any(ch in PAUSE_PUNCT for ch in stripped[:-1]):
         # 句尾的標點不算（那是結尾，不是中間）
-        return False
+        return []
     try:
-        segs = LangSegmenter.getTexts(text)
+        segs = LangSegmenter.getTexts(stripped)
     except Exception:  # noqa: BLE001
-        return False
-    # 非 en 一律視為 zh —— 與 TextPreprocessor.py:166-168 的處理一致
-    kinds = ["en" if s["lang"] == "en" else "zh" for s in segs]
-    return len(set(kinds)) > 1
+        return []
+    # 非 en 一律視為 zh —— 與 TextPreprocessor.py:166-168 的處理一致，
+    # 並且合併相鄰的同類片段（否則會數出不存在的邊界）
+    kinds: list[str] = []
+    for seg in segs:
+        k = "en" if seg["lang"] == "en" else "zh"
+        if not kinds or kinds[-1] != k:
+            kinds.append(k)
+    return [f"{a}2{b}" for a, b in zip(kinds, kinds[1:])]
+
+
+def has_language_switch_without_punct(text: str) -> bool:
+    return bool(boundaries(text))
 
 
 class GapLimiter:
@@ -73,7 +92,18 @@ class GapLimiter:
         rel_threshold: float = 0.04,
         abs_floor: float = 60.0,
         fade_ms: float = 2.0,
+        kinds: list[str] | None = None,
+        min_gap_ms: int = 150,
     ) -> None:
+        # 句中邊界的型別，依順序。只有 zh2en 的停頓會被消掉。
+        # 音訊上的 gap 和文字上的邊界是「依序對應」的近似 —— 模型不一定在
+        # 每個邊界都停，所以 gap 數通常少於邊界數。對不上的就不動。
+        self.kinds = list(kinds or [])
+        self.gap_index = 0
+        # 只有超過這個長度的靜音才算「一個語言邊界上的停頓」。
+        # 音節之間本來就有很多幾十毫秒的低能量空隙，把那些也算進來的話，
+        # 邊界索引會被吃光，真正的停頓反而對應不到正確的型別。
+        self.min_gap = int(sample_rate * min_gap_ms / 1000)
         self.sr = sample_rate
         self.win = max(1, int(sample_rate * win_ms / 1000))
         self.max_gap = int(sample_rate * max_gap_ms / 1000)
@@ -100,6 +130,17 @@ class GapLimiter:
             return []
         buf = np.concatenate(self._pending)
         self._pending.clear()
+
+        if len(buf) < self.min_gap:
+            # 音節之間的小空隙，不算邊界停頓，也不消耗邊界索引
+            return [buf]
+
+        kind = self.kinds[self.gap_index] if self.gap_index < len(self.kinds) else None
+        self.gap_index += 1
+        if kind != "zh2en":
+            # 英文接中文（或對應不到邊界）的停頓保持原樣
+            return [buf]
+
         if len(buf) <= self.max_gap:
             return [buf]
         self.trimmed_samples += len(buf) - self.max_gap
@@ -151,13 +192,14 @@ class GapLimiter:
 def limit_stream(
     chunks: Iterator[tuple[int, np.ndarray]],
     max_gap_ms: int,
+    kinds: list[str] | None = None,
 ) -> Iterator[tuple[int, np.ndarray]]:
-    """包住 synthesize() 的產生器，把中間過長的靜音縮到上限。"""
+    """包住 synthesize() 的產生器，把 zh2en 邊界上過長的靜音縮到上限。"""
     limiter: GapLimiter | None = None
     sr = 0
     for sr, chunk in chunks:
         if limiter is None:
-            limiter = GapLimiter(sr, max_gap_ms=max_gap_ms)
+            limiter = GapLimiter(sr, max_gap_ms=max_gap_ms, kinds=kinds)
         out = limiter.feed(chunk)
         if len(out):
             yield sr, out
