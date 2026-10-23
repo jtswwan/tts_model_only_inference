@@ -22,6 +22,7 @@ GPT-SoVITS 的**純推論** server。單一目標：**超低延遲**。
 - [4. 設計原則：「不動音質」的操作型定義](#4-設計原則不動音質的操作型定義)
 - [5. 低延遲設計](#5-低延遲設計)
 - [6. 對外介面](#6-對外介面)
+  - [6.1 換模型與換參考音訊](#61-換模型與換參考音訊)
 - [7. vendoring：用加法，不用刪除法](#7-vendoring用加法不用刪除法)
 - [8. 依賴瘦身](#8-依賴瘦身)
 - [9. 取樣參數](#9-取樣參數)
@@ -593,11 +594,30 @@ def get_bert_inf(self, phones, word2ph, norm_text, language):
 
 純英文句子的 BERT 特徵**本來就是零張量**。→ 純英文輸入完全跳過 BERT。
 
-### 5.7 文字前端快取
+### 5.7 參考音訊聲紋（sv_emb）快取
+
+`sv_emb` 只由參考音訊決定，但 upstream 在**逐段合成的迴圈裡每次重算**（`TTS.py:1259-1264`）：
+
+```python
+sv_emb = [] if self.is_v2pro else None
+...
+    if self.is_v2pro:
+        sv_emb.append(self.sv_model.compute_embedding3(audio_tensor))
+```
+
+而 `audio_tensor` 是 `_get_ref_spec()` 建好之後一直重用的同一個物件。
+
+CPU 實測 `compute_embedding3` 一次 **826 ms** —— 長文切成兩段就是每個請求白做 1.65 秒，其中第一段的 826 ms 直接算在 TTFA 裡。
+
+以輸入張量的物件識別為鍵做快取（同一個輸入 → 同一個輸出，等價）。字典持有該張量的強參照避免 `id()` 被重用，並額外做 `is` 檢查。參考音訊更換時清空。
+
+`/metrics` 的 `sv_cache` 會回報命中率。
+
+### 5.8 文字前端快取
 
 同一文本的音素序列與 BERT 特徵是確定性的 → 按文本內容快取 `(phones, bert_features, norm_text)`。對重複句型（提示語、固定回應）效果顯著，可讓階段 1 歸零。
 
-### 5.8 切句粒度：延遲與韻律的取捨
+### 5.9 切句粒度：延遲與韻律的取捨
 
 TTFA 與第一個 chunk 的 token 數成正比 → 切得細則延遲低。
 
@@ -605,13 +625,13 @@ TTFA 與第一個 chunk 的 token 數成正比 → 切得細則延遲低。
 
 **決定：做成明確參數，預設跟隨 upstream 的切句策略**（`text_segmentation_method.py`）。文件中記錄取捨，由實測決定是否調整。不偷偷為了延遲犧牲韻律。
 
-### 5.9 傳輸層
+### 5.10 傳輸層
 
 - **直接送 raw PCM**，不在請求路徑上做 WAV / 其他編碼
 - chunk 盡量小（與 §5.8 的切句粒度是不同層次的事：這裡只影響網路傳輸，不影響合成）
 - WebSocket 或 HTTP chunked，由客戶端選擇
 
-### 5.10 併發
+### 5.11 併發
 
 - **單 worker + 請求佇列**，GPU 操作序列化
 - 理由：GPU 上多請求並行會互相拖慢，且前一版的全域無鎖 engine 會直接對撞
@@ -629,6 +649,63 @@ TTFA 與第一個 chunk 的 token 數成正比 → 切得細則延遲低。
 | `POST /reference` | 切換參考音訊 / 參考文本，自動重新暖機 |
 | `GET /health` | 狀態、當前模型與版本、裝置、暖機是否完成，以及 `quality` 區塊（見 §4） |
 | `GET /metrics` | TTFA、每 token 時間、佇列長度 |
+
+### 6.1 換模型與換參考音訊
+
+兩個操作都是**先驗證、通過才動**，失敗時舊狀態完全不受影響。
+
+```bash
+# 換模型（含版本）—— 會重新載入並暖機
+curl -X POST localhost:8000/model -H 'Content-Type: application/json' \
+  -d '{"version":"v2Pro","vits":"GPT_SoVITS/pretrained_models/洛神_e8_v2Pro.pth"}'
+
+# 換參考音訊 / 參考文本 —— 只重算參考張量，不重載模型
+curl -X POST localhost:8000/reference -H 'Content-Type: application/json' \
+  -d '{"audio":"GPT_SoVITS/pretrained_models/reference/ref_pad.wav",
+       "text":"對應這段音訊的逐字稿"}'
+```
+
+CPU 實測耗時：換模型約 24 s（要重載全部模型），換參考音訊約 5 s。
+
+**為什麼換模型必須重建整個引擎**：`prompt_cache` 的 `prompt_semantic` 是用當前 SoVITS 模型的 `extract_latent` 算出來的（`TTS.py:830`）。換了 SoVITS 卻沿用舊的 `prompt_semantic` 就是髒資料。重建引擎會重跑暖機，自動處理掉。
+
+**換模型時先釋放舊的再載入新的**，而不是先建新的再換掉舊的 —— 後者會讓兩份模型同時在 GPU 上、VRAM 短暫加倍，V100 上可能直接 OOM。代價是這段時間請求收到 503，這比 OOM 好。
+
+#### preflight：為什麼不能把路徑檢查交給 upstream
+
+`engine.preflight()` 在載入任何模型之前先檢查完。有兩個必須自己做的理由：
+
+**1. 路徑不存在時 upstream 會安靜退回預設路徑。** `TTS.py:342-353`：
+
+```python
+if (self.vits_weights_path in [None, ""]) or (not os.path.exists(self.vits_weights_path)):
+    self.vits_weights_path = self.default_configs[version]["vits_weights_path"]
+    print(f"fall back to default vits_weights_path: {self.vits_weights_path}")
+```
+
+只有一行 print，沒有錯誤。結果是你要求模型 X、實際載到 v2Pro 底模，而且不知情。對「換模型」這個操作來說，安靜載錯模型比直接失敗糟得多。
+
+**2. SoVITS 的版本是從檔頭判定的，不是從設定。** `process_ckpt.py:100` 的 `get_sovits_version_from_path_fast()` 讀檔案前兩個 byte。所以設定寫 `version: v4`、檔案是 v2Pro 時，upstream 會照檔案走並自動修正 —— 你要的東西沒拿到，卻沒有任何提示。
+
+preflight 把這兩種情況都變成 **HTTP 400**，並附上可行動的訊息：
+
+```
+設定無法使用：
+  - version 設為 v4，但 .../洛神_e8_v2Pro.pth 的檔頭判定為 v2Pro（is_lora=False）。
+    版本是從檔頭讀的，不是從設定 —— 請改成 version=v2Pro，或換成真正的 v4 權重。
+```
+
+它也會檢查 v3/v4 的 LoRA 權重是否有對應底模可 merge（`TTS.py:560-581` 需要 `s2Gv4.pth`）。
+
+#### 實測過的失敗情境
+
+| 情境 | 結果 |
+|---|---|
+| `/model` 指到不存在的檔案 | 400，舊引擎完全不受影響 |
+| `/model` 的 version 與檔頭不符 | 400，附上檔頭判定結果 |
+| `/model` 通過 preflight 但載入失敗 | 500，並嘗試還原為先前的模型 |
+| `/reference` 指到不存在的音檔 | 400，參考設定不被改動 |
+| `/reference` 參考文本為空 | 400 |
 
 修正前一版的問題：
 

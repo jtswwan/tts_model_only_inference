@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Iterator
@@ -25,7 +26,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import wavio
-from .engine import Engine
+from .engine import Engine, PreflightError, preflight
 from .settings import ALLOWED_LANGS, Settings, load
 
 log = logging.getLogger("gsv.api")
@@ -33,6 +34,10 @@ log = logging.getLogger("gsv.api")
 PCM_MEDIA_TYPE = "audio/L16"
 
 _state: dict[str, Any] = {"engine": None, "settings": None}
+
+# 切換模型 / 參考音訊要序列化：兩個併發的切換會互相覆蓋，而且會讓
+# 兩份模型同時存在。
+_switch_lock = threading.Lock()
 
 
 def engine() -> Engine:
@@ -275,45 +280,115 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/model", summary="切換模型 / 版本（會重新載入並暖機）")
     def switch_model(req: ModelRequest) -> dict[str, Any]:
+        import copy
+
         settings: Settings = _state["settings"]
+        # 在動到任何東西之前先把新設定在副本上組起來並驗證完。
+        # 驗證不過就連舊引擎都不碰 —— 一個打錯字的請求不該讓 server 癱掉。
+        candidate = copy.deepcopy(settings)
         if req.version is not None:
-            settings.version = req.version
+            candidate.version = req.version
         if req.t2s is not None:
-            settings.models.t2s = req.t2s
+            candidate.models.t2s = req.t2s
         if req.vits is not None:
-            settings.models.vits = req.vits
+            candidate.models.vits = req.vits
         try:
-            settings.validate()
-        except ValueError as exc:
+            candidate.validate()
+            preflight(candidate)
+        except (ValueError, PreflightError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        log.info("切換模型：%s", {"version": settings.version, "vits": settings.models.vits})
-        try:
-            _state["engine"] = Engine(settings)
-        except Exception as exc:  # noqa: BLE001
-            log.exception("切換模型失敗")
+        log.info("切換模型：%s", {"version": candidate.version, "vits": candidate.models.vits})
+        with _switch_lock:
+            # 先把舊的釋放掉再載入新的。若先建新的再換掉舊的，兩份模型會同時
+            # 在 GPU 上、VRAM 短暫加倍 —— V100 上可能直接 OOM。代價是這段
+            # 時間內請求會收到 503，這比 OOM 好。
+            #
+            # 另外：prompt_cache 的 prompt_semantic 是用舊 vits 模型的
+            # extract_latent 算出來的（TTS.py:830），換模型後必須重算。
+            # 重建 Engine 會重跑暖機，所以自動處理掉。
+            previous = copy.deepcopy(settings)
+            old = _state.get("engine")
             _state["engine"] = None
-            raise HTTPException(status_code=500, detail=f"切換失敗: {type(exc).__name__}: {exc}") from exc
+            if old is not None:
+                old.release()
+            try:
+                engine_new = Engine(candidate)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("切換模型失敗，嘗試還原先前的設定")
+                # preflight 已經過了還失敗，代表是載入本身的問題。
+                # 盡力把原本的狀態救回來，不要把 server 留在沒有引擎的狀態。
+                try:
+                    _state["engine"] = Engine(previous)
+                    _state["settings"] = previous  # 與引擎持有的是同一物件
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"切換失敗（已還原為先前的模型）: {type(exc).__name__}: {exc}",
+                    ) from exc
+                except HTTPException:
+                    raise
+                except Exception as restore_exc:  # noqa: BLE001
+                    log.exception("還原也失敗")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            f"切換失敗且無法還原: {type(exc).__name__}: {exc}；"
+                            f"還原錯誤: {type(restore_exc).__name__}: {restore_exc}"
+                        ),
+                    ) from exc
+            _state["engine"] = engine_new
+            # 關鍵：讓 _state["settings"] 就是引擎持有的那一份物件。
+            #
+            # Engine(candidate) 持有的是 candidate，若這裡不換掉
+            # _state["settings"]，兩者就會變成不同物件 —— 之後 /reference
+            # 改的是沒人讀的那一份，set_reference() 仍用舊路徑重新暖機並
+            # 回 200，切換靜默失效。
+            _state["settings"] = candidate
         return _state["engine"].status()
 
     @app.post("/reference", summary="切換參考音訊（會重新暖機）")
     def switch_reference(req: ReferenceRequest) -> dict[str, Any]:
-        settings: Settings = _state["settings"]
+        import copy
+        import os
+
         if req.lang is not None and req.lang not in ALLOWED_LANGS:
             raise HTTPException(status_code=400, detail=f"lang 只接受 {sorted(ALLOWED_LANGS)}")
+
+        eng = engine()
+        # 一定要改「引擎持有的那一份」設定，不是 _state["settings"] ——
+        # 兩者在 /model 之後可能已經是不同物件。
+        live = eng.settings
+
+        # 先在副本上驗證，失敗就什麼都不動
+        candidate = copy.deepcopy(live.reference)
         if req.audio is not None:
-            settings.reference.audio = req.audio
+            candidate.audio = req.audio
         if req.text is not None:
-            settings.reference.text = req.text
+            candidate.text = req.text
         if req.lang is not None:
-            settings.reference.lang = req.lang
+            candidate.lang = req.lang
+        if not candidate.text.strip():
+            raise HTTPException(status_code=400, detail="reference.text 不可為空")
+        full = live.resolve(candidate.audio)
+        if not os.path.isfile(full):
+            raise HTTPException(status_code=400, detail=f"找不到參考音訊: {candidate.audio}")
+
+        previous = copy.deepcopy(live.reference)
         try:
-            engine().set_reference()
-        except FileNotFoundError as exc:
+            with _switch_lock:
+                live.reference = candidate
+                eng.set_reference()
+        except (PreflightError, FileNotFoundError) as exc:
+            live.reference = previous
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
-            log.exception("切換參考音訊失敗")
+            log.exception("切換參考音訊失敗，還原先前的參考")
+            live.reference = previous
+            try:
+                eng.set_reference()
+            except Exception:  # noqa: BLE001
+                log.exception("還原參考音訊也失敗")
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
-        return engine().status()
+        return eng.status()
 
     return app

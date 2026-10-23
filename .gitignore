@@ -22,3 +22,7 @@ output/
 .DS_Store
 .idea/
 .vscode/
+
+# 測試產生的暫存
+hdr*.txt
+samples/

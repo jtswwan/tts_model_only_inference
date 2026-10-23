@@ -39,6 +39,79 @@ def _resolve_device(spec: str) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+class PreflightError(ValueError):
+    """設定在載入模型之前就被判定不可用。"""
+
+
+def preflight(settings: Settings) -> dict[str, Any]:
+    """在建構 TTS 之前把能查的都查完，有問題大聲失敗。
+
+    有兩個必須自己檢查、不能交給 upstream 的理由：
+
+    1. 路徑不存在時 upstream 會「安靜退回預設路徑」（TTS.py:342-353 的
+       fall back to default）。結果是你要求模型 X、實際載到 v2Pro 底模，
+       而且只有一行 print，沒有任何錯誤。對「換模型」這個操作來說，
+       安靜載錯模型比直接失敗糟得多。
+
+    2. SoVITS 的版本是從「檔頭」判定的（process_ckpt.py:100 的
+       get_sovits_version_from_path_fast），不是從設定。所以設定寫 v4、
+       檔案是 v2Pro 時，upstream 會照檔案走並自動修正 —— 使用者要求的
+       東西沒拿到，卻沒有任何提示。
+    """
+    import os
+
+    problems: list[str] = []
+    paths = {
+        "models.t2s": settings.models.t2s,
+        "models.vits": settings.models.vits,
+        "models.bert": settings.models.bert,
+        "models.cnhubert": settings.models.cnhubert,
+        "reference.audio": settings.reference.audio,
+    }
+    for name, rel in paths.items():
+        full = settings.resolve(rel)
+        if not os.path.exists(full):
+            problems.append(f"{name} 不存在: {rel}")
+
+    detected: dict[str, Any] = {}
+    vits_full = settings.resolve(settings.models.vits)
+    if os.path.isfile(vits_full):
+        try:
+            from process_ckpt import get_sovits_version_from_path_fast
+
+            text_version, model_version, is_lora = get_sovits_version_from_path_fast(vits_full)
+            detected = {
+                "text_version": text_version,
+                "model_version": model_version,
+                "is_lora": bool(is_lora),
+            }
+            if model_version != settings.version:
+                problems.append(
+                    f"version 設為 {settings.version}，但 {settings.models.vits} 的檔頭"
+                    f"判定為 {model_version}（is_lora={bool(is_lora)}）。"
+                    f"版本是從檔頭讀的，不是從設定 —— 請改成 version={model_version}，"
+                    f"或換成真正的 {settings.version} 權重。"
+                )
+            if is_lora:
+                # v3/v4 的 LoRA 權重需要對應底模才能 merge（TTS.py:560-581）
+                base = {
+                    "v3": "GPT_SoVITS/pretrained_models/s2Gv3.pth",
+                    "v4": "GPT_SoVITS/pretrained_models/gsv-v4-pretrained/s2Gv4.pth",
+                }.get(model_version)
+                if base and not os.path.exists(settings.resolve(base)):
+                    problems.append(
+                        f"{settings.models.vits} 是 {model_version} 的 LoRA 權重，"
+                        f"需要底模 {base} 才能 merge，但它不存在。"
+                        f"請見 scripts/fetch_models.sh 末尾的說明。"
+                    )
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"無法判定 {settings.models.vits} 的版本: {type(exc).__name__}: {exc}")
+
+    if problems:
+        raise PreflightError("設定無法使用：\n  - " + "\n  - ".join(problems))
+    return detected
+
+
 def _build_tts_config(settings: Settings) -> TTS_Config:
     """建構 TTS_Config。
 
@@ -123,6 +196,54 @@ class _PhoneBertCache:
             self._data.clear()
 
 
+class _SvEmbCache:
+    """參考音訊的聲紋嵌入快取。
+
+    sv_emb 只由參考音訊決定，但 upstream 在逐段合成的迴圈裡每次都重算
+    （TTS.py:1259-1264 的 sv_emb.append(self.sv_model.compute_embedding3(...))），
+    而傳進去的張量是 _get_ref_spec 建好之後一直重用的同一個物件。
+
+    實測在 CPU 上 compute_embedding3 一次 826 ms —— 長文切成兩段就是每個
+    請求白做 1.65 秒，其中第一段的 826 ms 直接算在 TTFA 裡。
+
+    以輸入張量的物件識別為鍵，所以是「同一個輸入 → 同一個輸出」，等價。
+    字典持有該張量的強參照，避免 id() 在物件被釋放後被重用而誤命中；
+    另外也做 `is` 檢查雙重確認。參考音訊更換時必須 clear()，否則會一直
+    抓著舊的參考張量不放。
+    """
+
+    def __init__(self) -> None:
+        self._data: dict[int, tuple[Any, Any]] = {}
+        self.hits = 0
+        self.misses = 0
+
+    def wrap(self, fn):
+        def wrapped(wav):
+            key = id(wav)
+            hit = self._data.get(key)
+            if hit is not None and hit[0] is wav:
+                self.hits += 1
+                return hit[1].clone()
+            out = fn(wav)
+            self.misses += 1
+            self._data[key] = (wav, out.clone())
+            return out
+
+        return wrapped
+
+    def stats(self) -> dict[str, Any]:
+        total = self.hits + self.misses
+        return {
+            "entries": len(self._data),
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": round(self.hits / total, 3) if total else None,
+        }
+
+    def clear(self) -> None:
+        self._data.clear()
+
+
 class Engine:
     """序列化的推論引擎。
 
@@ -139,6 +260,10 @@ class Engine:
         self.trim_stats: dict[str, Any] = {}
         self.trim_verified = False
         self.quality_notes: list[str] = []
+
+        self.detected = preflight(settings)
+        if self.detected:
+            log.info("SoVITS 檔頭判定: %s", self.detected)
 
         t0 = time.perf_counter()
         self.config = _build_tts_config(settings)
@@ -177,6 +302,15 @@ class Engine:
         self.text_cache = _PhoneBertCache(settings.latency.text_cache_size)
         pre = self.tts.text_preprocessor
         pre.get_phones_and_bert = self.text_cache.wrap(pre.get_phones_and_bert)
+
+        # SV 聲紋快取只有 v2Pro 系列需要（v4 的 is_v2pro 為 False，
+        # TTS.py:1259 根本不會呼叫 compute_embedding3）。
+        self.sv_cache = _SvEmbCache()
+        if getattr(self.tts, "is_v2pro", False):
+            self.tts.init_sv_model()
+            self.tts.sv_model.compute_embedding3 = self.sv_cache.wrap(
+                self.tts.sv_model.compute_embedding3
+            )
 
         self._warn_quality_deviations()
         self.warmup()
@@ -268,10 +402,12 @@ class Engine:
 
         path = self.settings.resolve(self.settings.reference.audio)
         if not os.path.isfile(path):
-            raise FileNotFoundError(f"找不到參考音訊: {path}")
+            raise PreflightError(f"找不到參考音訊: {self.settings.reference.audio}")
         self.warm = False
         # prompt 文本可能跟著換，對應的前端快取一併清掉
         self.text_cache.clear()
+        # 參考張量換了，舊的聲紋快取既失效也會一直抓著舊張量不放
+        self.sv_cache.clear()
         return self.warmup()
 
     # ---- 推論 ----
@@ -365,6 +501,27 @@ class Engine:
             finally:
                 self._total.append(time.perf_counter() - start)
 
+    def release(self) -> None:
+        """釋放模型佔用的記憶體。
+
+        切換模型時要先釋放舊的再載入新的 —— 否則兩份模型會同時在 GPU 上，
+        VRAM 短暫加倍。V100 上載第二份可能直接 OOM。
+        """
+        self.text_cache.clear()
+        self.sv_cache.clear()
+        self.tts = None
+        self.config = None
+        import gc
+
+        gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001
+            pass
+
     def stop(self) -> None:
         """要求 upstream 在下一個檢查點中止目前的推論（TTS.stop）。"""
         self.tts.stop()
@@ -388,6 +545,7 @@ class Engine:
             "ttfa": summary(self._ttfa),
             "total": summary(self._total),
             "text_cache": self.text_cache.stats(),
+            "sv_cache": self.sv_cache.stats(),
             "bert_trim": self.trim_stats or None,
             "model_load_seconds": round(self.load_seconds, 2),
         }
