@@ -1,0 +1,69 @@
+# GPT-SoVITS 純推論 server 設定
+#
+# 任何一項都可用環境變數覆寫，雙底線代表層級：
+#   GSV_LATENCY__PROFILE=low
+#   GSV_SERVER__PORT=9000
+#   GSV_MODELS__VITS=GPT_SoVITS/pretrained_models/其他模型.pth
+#
+# 相對路徑以 server/ 為基準。
+
+version: v2Pro        # v2Pro | v2ProPlus | v4
+device: auto          # auto | cuda | cuda:0 | cpu
+is_half: true
+
+# "zh" 在 upstream 的註解是「按中英混合识别」—— 正是本專案要的中英混合。
+# 不可設為 "auto"：那會讓偵測到的日文/韓文去 import 已移除的前端模組。
+text_lang: zh
+
+models:
+  t2s:  GPT_SoVITS/pretrained_models/洛神-e15.ckpt
+  vits: GPT_SoVITS/pretrained_models/洛神_e8_v2Pro.pth
+  bert: GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large
+  cnhubert: GPT_SoVITS/pretrained_models/chinese-hubert-base
+
+# 參考音訊固定。它衍生的四樣東西（prompt_semantic、refer_spec、sv_emb、
+# prompt 文本的 phones 與 bert_features）在啟動時一次算完，之後請求路徑上
+# 不再碰 CNHubert 與 SV 模型，也沒有任何音檔 I/O。
+reference:
+  audio: GPT_SoVITS/pretrained_models/reference/19.wav
+  text: 我想，你们不必担忧我们的成长，会给你们带来威胁或阻碍。
+  lang: zh
+
+# 取自 upstream 執行時預設（TTS.py:1011-1013）。洛神 ckpt 裡的
+# config.inference.top_k=15 是訓練 config 的欄位，不是推論預設。
+sampling:
+  top_k: 5
+  top_p: 1.0
+  temperature: 1.0
+  repetition_penalty: 1.35
+  speed_factor: 1.0
+  seed: -1
+
+latency:
+  # quality: return_fragment=True（upstream 標 "Best Quality"），並保持
+  #          parallel_infer=True，使 AR 走 infer_panel_batch_infer，
+  #          與 upstream 預設同一條路徑。逐句組吐出。
+  # low:     streaming_mode=True（upstream 標 "Medium quality"），會強制
+  #          parallel_infer=False，AR 改走 infer_panel_naive。TTFA 更低，
+  #          但依 upstream 自己的標註，音質較差。
+  profile: quality
+
+  # cut1 = 每 4 句一組（upstream 預設）。cut3 = 逐句，TTFA 更低，但會改變
+  # 送進 GPT 的文本 → 改變韻律。要調請明確知道在換什麼。
+  text_split_method: cut1
+  fragment_interval: 0.3
+
+  # 僅 profile=low 時生效
+  overlap_length: 2
+  min_chunk_length: 16
+  fixed_length_chunk: false   # upstream 標 "lower quality"
+
+  # 等價優化（README §4 類別一），預設開啟
+  trim_bert: true
+  warmup_dummy_run: true
+  text_cache_size: 512
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  pcm_chunk_samples: 4096   # 只影響網路傳輸切塊，不影響合成

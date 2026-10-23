@@ -1,0 +1,65 @@
+# 本清單由 scripts/import_graph.py 掃出 server/ 實際 import 的外部套件而來，
+# 不是從 upstream 的 requirements.txt 抄改。版本約束沿用 upstream 的釘選。
+#
+# 相較 upstream 移除的（訓練 / ASR / WebUI / 非中英文前端）：
+#   tensorboard  gradio  funasr  faster-whisper  ctranslate2  modelscope  av
+#   pyopenjtalk  g2pk2  ko_pron  ToJyutping  python_mecab_ko
+#   sentencepiece  chardet  psutil  rotary_embedding_torch
+#
+# 以下幾項看起來不該出現在純推論的清單裡，但確實是被保留檔案在 import 期
+# 需要的，移除它們就得修改 upstream 的程式碼（本專案不改）：
+#   pytorch-lightning  AR/models/t2s_lightning_module.py（TTS.py:24 直接 import）
+#   torchmetrics       AR/models/t2s_model.py（AR 模型本體）
+#   matplotlib         BigVGAN/utils0.py、GPT_SoVITS/utils.py、AR/modules/lr_schedulers.py
+#   x_transformers     f5_tts/（module/models.py:13 無條件 import，v2Pro 也需要）
+#   huggingface_hub    BigVGAN/bigvgan.py
+#   requests           text/g2pw/onnx_api.py
+
+# --- 核心 ---
+torch
+torchaudio
+numpy<2.0
+scipy
+librosa==0.10.2
+transformers>=4.43,<=4.50
+pytorch-lightning>=2.4
+torchmetrics<=1.5
+peft
+einops
+matplotlib
+huggingface_hub
+packaging
+tqdm
+
+# --- 中文前端 ---
+cn2an
+pypinyin
+jieba
+jieba_fast
+--no-binary=opencc
+opencc
+onnxruntime; platform_machine == "aarch64" or platform_machine == "arm64"
+onnxruntime-gpu; platform_machine == "x86_64" or platform_machine == "AMD64"
+requests
+
+# --- 英文前端 ---
+g2p_en
+nltk
+inflect
+wordsegment
+
+# --- 中英混合分段 ---
+split-lang
+fast_langdetect>=0.3.1
+
+# --- 音訊 I/O ---
+ffmpeg-python
+
+# --- server ---
+fastapi[standard]>=0.115.2
+pydantic<=2.10.6
+uvicorn
+PyYAML
+
+# --- v4 專用（v2Pro 不需要權重，但程式碼為無條件 import，見上） ---
+x_transformers
