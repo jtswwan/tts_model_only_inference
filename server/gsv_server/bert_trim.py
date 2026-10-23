@@ -119,11 +119,19 @@ def assert_equivalent(before: list[torch.Tensor], after: list[torch.Tensor]) -> 
             )
 
 
+# scripts/prepare.py 離線剪裁後會在 config 裡留下這兩個標記。
+PRETRIMMED_FLAG = "gsv_pretrimmed"
+ORIGINAL_LAYERS_KEY = "gsv_original_num_hidden_layers"
+
+
 def trim(mlm_model: nn.Module) -> tuple[nn.Module, dict]:
     """原地剪裁並回傳 (替換用的模組, 說明用的統計資料)。
 
     傳入的是 TTS.init_bert_weights 建出來的 AutoModelForMaskedLM，
     此時它已經搬到目標裝置且套用了 half()。
+
+    若模型已由 scripts/prepare.py 離線剪裁過（config 裡有 gsv_pretrimmed），
+    就只做包裝不再剪層 —— 否則會對 22 層的模型再剪成 20 層，取到錯誤的層。
     """
     base = getattr(mlm_model, "bert", None)
     if base is None:
@@ -133,17 +141,34 @@ def trim(mlm_model: nn.Module) -> tuple[nn.Module, dict]:
 
     layers = base.encoder.layer
     num_layers = len(layers)
-    keep = needed_layer_index(num_layers)
-    if keep < 1:
-        raise ValueError(f"層數太少（{num_layers}），無法剪裁")
+    pretrimmed = bool(getattr(base.config, PRETRIMMED_FLAG, False))
 
-    original_hidden_states_len = num_layers + 1
+    if pretrimmed:
+        original_layers = getattr(base.config, ORIGINAL_LAYERS_KEY, None)
+        if not isinstance(original_layers, int) or original_layers < num_layers:
+            raise ValueError(
+                f"模型標記為已離線剪裁，但 {ORIGINAL_LAYERS_KEY} 不可用（{original_layers!r}）。"
+                "無法確定 hidden_states 原本的長度，拒絕繼續 —— 猜錯會取到錯誤的層。"
+            )
+        if needed_layer_index(original_layers) != num_layers:
+            raise ValueError(
+                f"已離線剪裁的模型層數不一致：原本 {original_layers} 層應剪到 "
+                f"{needed_layer_index(original_layers)} 層，實際有 {num_layers} 層。"
+            )
+        keep = num_layers
+        original_hidden_states_len = original_layers + 1
+    else:
+        keep = needed_layer_index(num_layers)
+        if keep < 1:
+            raise ValueError(f"層數太少（{num_layers}），無法剪裁")
+        original_hidden_states_len = num_layers + 1
     before = sum(p.numel() for p in mlm_model.parameters())
 
-    # 1. 丟掉用不到的最後兩層
-    base.encoder.layer = nn.ModuleList(list(layers)[:keep])
-    if hasattr(base.config, "num_hidden_layers"):
-        base.config.num_hidden_layers = keep
+    # 1. 丟掉用不到的最後兩層（已離線剪裁過的就跳過）
+    if not pretrimmed:
+        base.encoder.layer = nn.ModuleList(list(layers)[:keep])
+        if hasattr(base.config, "num_hidden_layers"):
+            base.config.num_hidden_layers = keep
 
     # 2. 丟掉 pooler（BertModel.forward 對 None 有判斷）
     if getattr(base, "pooler", None) is not None:
@@ -159,7 +184,8 @@ def trim(mlm_model: nn.Module) -> tuple[nn.Module, dict]:
         torch.cuda.empty_cache()
 
     stats = {
-        "num_layers_original": num_layers,
+        "pretrimmed": pretrimmed,
+        "num_layers_original": original_hidden_states_len - 1,
         "num_layers_kept": keep,
         "needed_layer_index": keep,
         "hidden_states_len_original": original_hidden_states_len,

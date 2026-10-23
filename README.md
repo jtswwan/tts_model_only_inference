@@ -22,7 +22,8 @@ GPT-SoVITS 的**純推論** server。單一目標：**超低延遲**。
 - [4. 設計原則：「不動音質」的操作型定義](#4-設計原則不動音質的操作型定義)
 - [5. 低延遲設計](#5-低延遲設計)
 - [6. 對外介面](#6-對外介面)
-  - [6.1 換模型與換參考音訊](#61-換模型與換參考音訊)
+  - [6.1 裝一組新的模型 / 參考音訊](#61-裝一組新的模型--參考音訊)
+  - [6.2 換模型與換參考音訊](#62-換模型與換參考音訊)
 - [7. vendoring：用加法，不用刪除法](#7-vendoring用加法不用刪除法)
 - [8. 依賴瘦身](#8-依賴瘦身)
 - [9. 取樣參數](#9-取樣參數)
@@ -650,7 +651,63 @@ TTFA 與第一個 chunk 的 token 數成正比 → 切得細則延遲低。
 | `GET /health` | 狀態、當前模型與版本、裝置、暖機是否完成，以及 `quality` 區塊（見 §4） |
 | `GET /metrics` | TTFA、每 token 時間、佇列長度 |
 
-### 6.1 換模型與換參考音訊
+### 6.1 裝一組新的模型 / 參考音訊
+
+模型與參考音訊都在 `server/config.yaml`，**不是寫死的**：
+
+| 項目 | 設定 | 執行中切換 |
+|---|---|---|
+| GPT (s1) / SoVITS (s2) | `models.t2s` / `models.vits` | `POST /model` |
+| 參考音訊 / 逐字稿 | `reference.audio` / `reference.text` | `POST /reference` |
+
+任何欄位都可用環境變數覆寫（`GSV_MODELS__VITS=...`）。
+
+**但換一組新的不只是改路徑。** 有五個條件必須滿足，而其中三個不滿足時失敗的樣子並不明顯：
+
+1. 權重必須放在 `server/GPT_SoVITS/pretrained_models/` 底下 —— upstream 把這個相對路徑寫死在 `sv.py:6` 與 `text/chinese2.py:35`
+2. `version` 必須和 SoVITS 權重的**檔頭**一致（`process_ckpt.py:100`），不一致時 upstream 會照檔案走並安靜自動修正
+3. v3/v4 的角色權重只含 LoRA 增量，需要對應底模才能 merge（`TTS.py:560-581`）
+4. 參考音訊長度必須在 3–10 秒之間（`TTS.py:816` 的硬性檢查）
+5. 路徑打錯時 upstream 會**安靜退回預設路徑**（`TTS.py:342-353`），結果是載到底模而非你的角色模型
+
+`scripts/add_voice.py` 把這些全部檢查完、檔案放好、並印出該填的設定：
+
+```bash
+python scripts/add_voice.py --name 新角色 \
+    --sovits /path/新角色_e8.pth \
+    --gpt    /path/新角色-e15.ckpt \
+    --ref    /path/參考.wav \
+    --ref-text "參考音訊的逐字稿"
+
+    --dry-run          只檢查，不複製檔案
+    --apply            檢查通過後寫進 config.yaml（原檔備份為 .yaml.bak）
+    --server URL       直接套用到執行中的 server，不必重啟
+```
+
+它會自動從檔頭判定 `version`、核對 GPT 與 SoVITS 的符號集是否相符、把參考音訊轉成 server 的原生取樣率與單聲道（只做可證明不影響輸出的轉換），最後用 server 自己的 `preflight()` 再確認一次。
+
+實測的拒絕情境：
+
+| 情境 | 訊息 |
+|---|---|
+| v4 LoRA 權重但缺底模 | 列出缺哪些檔案、該放到哪個路徑 |
+| 參考音訊 1.5 秒 | 「長度 1.50s 不在 3~10 秒之間（`TTS.py:816` 會報錯）」 |
+| 逐字稿留空 | 「它是參考音訊的逐字稿，影響音色」 |
+| GPT 與 SoVITS 符號集不符 | 指出 `phoneme_vocab_size` 與 `text_version` 對不上 |
+
+#### 暖機：把換好的東西變成立刻可用
+
+裝好之後，**啟動時與每次切換後都會自動暖機**，這是「成本付在切換時而不是之後每個請求上」的地方：
+
+| 暖機步驟 | 之後每次請求省掉的 |
+|---|---|
+| `set_ref_audio` → `prompt_semantic`、`refer_spec` | CNHubert 前向、音檔 I/O、重採樣 |
+| 第一次 `compute_embedding3` | SV 聲紋，CPU 實測 826 ms／段（見 §5.7） |
+| dummy 推論 | CUDA/MKL kernel、onnxruntime session、jieba 詞典的一次性成本 |
+
+CPU 實測：`/model` 約 24 s、`/reference` 約 5 s。暖機**假設你給的東西是對的** —— 驗證是 `add_voice.py` 與 `preflight()` 的工作，不是暖機的。
+
+### 6.2 換模型與換參考音訊
 
 兩個操作都是**先驗證、通過才動**，失敗時舊狀態完全不受影響。
 
@@ -861,6 +918,8 @@ server/
     __main__.py           唯一的啟動進入點
 
 scripts/
+  add_voice.py            裝一組新的模型 + 參考音訊（檢查、放檔、產生設定）
+  prepare.py              離線剪裁 BERT 等啟動時間優化（選用）
   manifest.txt            vendored 檔案的唯一真實清單（每組都寫明理由）
   vendor_upstream.sh      依 manifest 複製；清單中的路徑不存在就中止
   import_graph.py         可達性分析 / 斷鏈驗證 / --manifest 重新產生清單
