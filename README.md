@@ -107,8 +107,14 @@ CPU 版總計約 **4.7 GB**。
 ### 系統需求
 
 - **Python 3.10 ~ 3.12**。不能用 3.13：upstream 釘 `numpy<2.0`，而它在 3.13 沒有 wheel。另外 `jieba_fast` 只有 2019 年的 source tarball，必須就地編譯 C 擴充（3.11 / 3.12 實測可通過）
-- `ffmpeg`（`torchaudio` 讀音檔用）
+- Debian / Ubuntu 可能要先 `apt install python3-venv`（venv 在那裡是獨立套件）
+- 約 5 GB 磁碟空間
+- 能連到 `huggingface.co` 與 `pypi.org`（權重與套件都從那裡抓）
 - GPU 非必要。CPU 跑得動但約 0.6–0.8× 即時（見 §11.1）
+
+**ffmpeg 不是硬性需求。** 實測 `torchaudio` 的 `soundfile` 後端可以直接讀 16-bit PCM wav，而 `soundfile` 是 `librosa` 的相依套件一定會裝。`TTS.py:18` 的 `import ffmpeg` 是 pip 套件 `ffmpeg-python`，只有在轉 mp3/aac 時才會呼叫 ffmpeg 執行檔，本專案的路徑不走它。裝了也無妨。
+
+**CUDA 版本自動選擇。** 啟動器讀 `nvidia-smi` 回報的驅動版本來挑 PyTorch channel：驅動 ≥ 525 用 `cu121`，更舊用 `cu118`。寫死 `cu121` 會在舊驅動的機器上裝完才發現跑不起來。要覆寫用 `--cuda cu118`（或 `cu124`、`cpu`）。
 
 ### 手動安裝
 

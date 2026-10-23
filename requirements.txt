@@ -72,6 +72,9 @@ split-lang
 fast_langdetect>=0.3.1
 
 # --- 音訊 I/O ---
+# ffmpeg-python 是 TTS.py:18 無條件 import 的 pip 套件，但它只在轉 mp3/aac
+# 時才呼叫 ffmpeg 執行檔，本專案的路徑不走它。實測 torchaudio 的 soundfile
+# 後端（librosa 的相依套件）足以讀 16-bit PCM wav，所以不需要系統裝 ffmpeg。
 ffmpeg-python
 
 # --- server ---

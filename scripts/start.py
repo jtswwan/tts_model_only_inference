@@ -246,13 +246,35 @@ def find_python() -> str:
     )
 
 
-def has_nvidia() -> bool:
+def nvidia_driver() -> str | None:
+    """回傳 NVIDIA 驅動版本字串，沒有 GPU 則回 None。"""
     if not shutil.which("nvidia-smi"):
-        return False
+        return None
     try:
-        return subprocess.run(["nvidia-smi"], capture_output=True, timeout=20).returncode == 0
+        r = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:
+            return None
+        first = r.stdout.strip().splitlines()[0].strip()
+        return first or None
     except Exception:
-        return False
+        return None
+
+
+def cuda_channel(driver: str | None) -> str:
+    """依驅動版本挑 PyTorch 的 CUDA channel。
+
+    寫死 cu121 會在舊驅動的機器上裝完才發現跑不起來。CUDA 12.x 的
+    minor version compatibility 需要驅動 >= 525.60.13；更舊的只能用 cu118
+    （需要 >= 450.80.02）。寧可少用一點新特性也不要裝完才失敗。
+    """
+    if not driver:
+        return "cpu"
+    try:
+        major = int(driver.split(".")[0])
+    except Exception:
+        return "cu118"
+    return "cu121" if major >= 525 else "cu118"
 
 
 def download(url: str, dest: Path, label: str) -> None:
@@ -308,13 +330,17 @@ def step_venv(py: str) -> Path:
         return vpy
     set_step("venv", "running", f"建立 {VENV.name}/")
     if run([py, "-m", "venv", str(VENV)]) != 0:
-        raise RuntimeError("建立虛擬環境失敗")
+        raise RuntimeError(
+            "建立虛擬環境失敗。Debian/Ubuntu 上 venv 常是獨立套件，"
+            f"請先安裝：sudo apt install python3-venv（或對應你的 Python 版本，"
+            f"例如 python{sys.version_info.major}.{sys.version_info.minor}-venv）"
+        )
     run([str(vpy), "-m", "pip", "install", "-q", "--upgrade", "pip"])
     set_step("venv", "done", str(VENV))
     return vpy
 
 
-def step_deps(vpy: Path, device: str) -> None:
+def step_deps(vpy: Path, device: str, cuda_override: str | None) -> None:
     set_step("deps", "running")
     probe = subprocess.run(
         [str(vpy), "-c", "import torch,transformers,librosa,fastapi,jieba_fast;print(torch.__version__)"],
@@ -323,10 +349,22 @@ def step_deps(vpy: Path, device: str) -> None:
         set_step("deps", "done", f"已安裝（torch {probe.stdout.strip()}）")
         return
 
-    gpu = device == "cuda" or (device == "auto" and has_nvidia())
-    index = "https://download.pytorch.org/whl/cu121" if gpu else "https://download.pytorch.org/whl/cpu"
-    set_step("deps", "running", f"安裝 torch（{'CUDA' if gpu else 'CPU'} 版）—— 這一步最久")
-    log(f"偵測結果：{'有 NVIDIA GPU' if gpu else '無 GPU，裝 CPU 版'}")
+    driver = nvidia_driver()
+    if cuda_override:
+        channel = "cpu" if cuda_override == "cpu" else cuda_override
+    elif device == "cpu":
+        channel = "cpu"
+    elif device == "cuda":
+        channel = cuda_channel(driver) if driver else "cu121"
+    else:
+        channel = cuda_channel(driver)
+    index = f"https://download.pytorch.org/whl/{channel}"
+    set_step("deps", "running", f"安裝 torch（{channel}）—— 這一步最久")
+    if driver:
+        log(f"偵測結果：NVIDIA 驅動 {driver} → 使用 {channel}")
+    else:
+        log(f"偵測結果：找不到 nvidia-smi，裝 {channel} 版")
+    log(f"（驅動太舊時 cu121 會裝完才失敗，所以依驅動版本挑；可用 --cuda 覆寫）")
     # torchaudio 必須 <2.9：2.9 起 torchaudio.load 改委派給 torchcodec，
     # 而 TTS.py:773 的 _get_ref_spec() 正是用它讀參考音訊。
     if run([str(vpy), "-m", "pip", "install", "torch>=2.1,<2.9", "torchaudio>=2.1,<2.9",
@@ -396,6 +434,9 @@ def main() -> int:
     ap.add_argument("--setup-only", action="store_true")
     ap.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto",
                     help="決定裝 CPU 版還是 CUDA 版的 torch")
+    ap.add_argument("--cuda", default=None, metavar="CHANNEL",
+                    help="覆寫 PyTorch 的 CUDA channel，例如 cu118 / cu121 / cu124 / cpu。"
+                         "預設依 nvidia-smi 回報的驅動版本自動挑")
     args = ap.parse_args()
 
     if args.download_only:
@@ -423,7 +464,7 @@ def main() -> int:
     try:
         py = step_python(args)
         vpy = step_venv(py)
-        step_deps(vpy, args.device)
+        step_deps(vpy, args.device, args.cuda)
         step_weights()
         step_nltk(vpy)
     except Exception as exc:
