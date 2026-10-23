@@ -178,6 +178,39 @@
     <div class="msg" id="synthMsg"></div>
   </section>
 
+  <!-- ─── 發音字典 ─── -->
+  <section class="wide">
+    <h2>發音字典</h2>
+    <div class="note">
+      英文：<code>english.py:322</code> 對「不在字典裡、長度 ≤ 3」的詞一律<b>逐字母拼讀</b>
+      （<code>GPU</code>→G-P-U 是對的，<code>wav</code>→W-A-V 就錯了）。
+      中文：g2pw 整句推理遇到人名與專有名詞會猜錯聲調。
+      下面查到的詞可以直接改，<b>存檔立刻生效，不用重啟</b>。
+    </div>
+    <textarea id="dictText" rows="2" style="min-height:52px">存成 wav 檔，這個 server 用 v2Pro 模型</textarea>
+    <div class="row">
+      <button id="dictLook">查這段怎麼唸</button>
+      <span class="pill" id="dictPath">—</span>
+    </div>
+    <div class="msg" id="dictMsg"></div>
+    <table><thead><tr>
+      <th>語言</th><th>詞</th><th>現在的發音</th><th>狀態</th><th style="width:230px">改成</th><th style="width:96px"></th>
+    </tr></thead><tbody id="dictRows">
+      <tr><td colspan="6" style="color:var(--fg-faint)">按上面的按鈕查詢</td></tr>
+    </tbody></table>
+    <div class="note" id="dictHint" style="display:none"></div>
+  </section>
+
+  <!-- ─── 被丟掉的音素 ─── -->
+  <section>
+    <h2>被丟掉的音素</h2>
+    <div class="note">
+      upstream 的 <code>replace_phs()</code> 對不在 <code>symbols2</code> 裡的音素只 print 一行就丟掉 ——
+      輸出會少一個音而且沒有任何錯誤。這裡把它顯示出來。
+    </div>
+    <dl class="kv" id="dropped"><dd>尚無</dd></dl>
+  </section>
+
   <!-- ─── 音質狀態 ─── -->
   <section>
     <h2>音質狀態</h2>
@@ -372,6 +405,7 @@ async function refresh() {
   if (!STATE.runtime) { try { STATE.runtime = await api("/runtime"); } catch (_) {} }
   try { STATE.candidates = await api("/candidates"); } catch (_) {}
   renderRuntime(); renderCandidates(); renderQuality(); renderStats(); renderHistory();
+  renderDropped();
 }
 
 /* ─────────── 合成（瀏覽器端量 TTFA） ─────────── */
@@ -473,6 +507,120 @@ $("applyRef").onclick = () => apply($("applyRef"), $("refMsg"), "/reference",
 
 refresh();
 setInterval(refresh, 5000);
+
+/* ─────────── 發音字典 ─────────── */
+// 英文的發音單位是 ARPAbet 音素（W EY1 V），中文是拼音（dang4）。
+// 兩邊都在 server 端驗證：打錯會回 400 並指名哪個字的哪個音素 / 拼音，
+// 而不是像 upstream 的 replace_phs() 那樣把音靜默丟掉。
+let DICT = null;
+
+async function dictLoad() {
+  try {
+    DICT = await api("/dict");
+    $("dictPath").textContent = DICT.path.replace(/^.*\//, "") +
+      "（en " + DICT.counts.en + " / zh " + DICT.counts.zh + "）";
+    renderDropped();
+  } catch (e) { /* 字典是選用的，載不到不擋控制台 */ }
+}
+
+function renderDropped() {
+  const el = $("dropped");
+  const items = (STATE.metrics && STATE.metrics.dropped_phones) ||
+                (DICT && DICT.recent_dropped_phones) || [];
+  if (!items.length) { el.innerHTML = "<dd>尚無 —— 沒有音素被丟掉</dd>"; return; }
+  el.innerHTML = items.slice(-8).reverse().map((d) =>
+    "<dt>#" + d.seq + "</dt><dd class='bad'>" + esc(d.phones.join(" ")) + "</dd>").join("");
+}
+
+async function dictLookup() {
+  const text = $("dictText").value.trim();
+  if (!text) return;
+  const btn = $("dictLook");
+  btn.disabled = true;
+  clear($("dictMsg"));
+  try {
+    const r = await api("/dict/lookup", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    renderLookup(r);
+  } catch (e) {
+    msg($("dictMsg"), "查詢失敗：" + esc(e.message), "bad");
+  } finally { btn.disabled = false; }
+}
+
+function renderLookup(r) {
+  const body = $("dictRows");
+  if (!r.items.length) {
+    body.innerHTML = "<tr><td colspan='6' style='color:var(--fg-faint)'>這段文字沒有可查的詞</td></tr>";
+    return;
+  }
+  let anyShadow = false;
+  body.innerHTML = r.items.map((it, i) => {
+    const cur = (it.pinyin || it.phones || []).join(" ");
+    const tags = [];
+    if (it.custom) tags.push("<span class='pill ok'>自訂</span>");
+    if (it.letter_by_letter) tags.push("<span class='pill bad'>逐字母拼讀</span>");
+    if (it.shadows_single_chars) { tags.push("<span class='pill'>整詞條目</span>"); anyShadow = true; }
+    if (!tags.length) tags.push("<span class='sub'>upstream 預設</span>");
+    const ph = it.lang === "en" ? "W EY1 V" : "dang4";
+    return "<tr><td>" + it.lang + "</td><td><b>" + esc(it.word) + "</b></td>" +
+      "<td><code>" + esc(cur) + "</code></td><td>" + tags.join(" ") + "</td>" +
+      "<td><input id='dv" + i + "' value='" + esc(cur) + "' placeholder='" + ph + "'></td>" +
+      "<td><button class='ghost' data-i='" + i + "' data-lang='" + it.lang +
+      "' data-word='" + esc(it.word) + "' data-custom='" + (it.custom ? "1" : "") +
+      "'>" + (it.custom ? "刪除" : "存檔") + "</button></td></tr>";
+  }).join("");
+
+  const hint = $("dictHint");
+  if (anyShadow) {
+    hint.style.display = "";
+    hint.innerHTML = "標著「整詞條目」的詞，upstream 的 <code>polyphonic.rep</code> 已經有整詞的讀音" +
+      "（共 45,046 筆）。<code>correct_pronunciation()</code> <b>先查整詞，查到就直接回傳</b>，" +
+      "所以改那個詞裡的<b>單字</b>不會有反應 —— 要改就改整個詞。";
+  } else { hint.style.display = "none"; }
+
+  body.querySelectorAll("button[data-word]").forEach((b) => {
+    b.addEventListener("click", () => dictSave(b));
+  });
+  if (r.dropped_phones && r.dropped_phones.length) {
+    msg($("dictMsg"), "這段文字有音素會被丟掉：<code>" +
+      esc(r.dropped_phones.join(" ")) + "</code>", "bad");
+  }
+}
+
+async function dictSave(btn) {
+  const lang = btn.dataset.lang, word = btn.dataset.word;
+  const isDelete = btn.dataset.custom === "1";
+  const val = $("dv" + btn.dataset.i).value.trim().split(/\s+/).filter(Boolean);
+  btn.disabled = true;
+  clear($("dictMsg"));
+  try {
+    let r;
+    if (isDelete) {
+      r = await api("/dict?lang=" + encodeURIComponent(lang) +
+                    "&word=" + encodeURIComponent(word), { method: "DELETE" });
+      msg($("dictMsg"), "已刪除 <b>" + esc(word) + "</b>，還原成 upstream 原本的讀音", "ok");
+    } else {
+      if (!val.length) { msg($("dictMsg"), "發音不能是空的", "bad"); btn.disabled = false; return; }
+      r = await api("/dict", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lang, word, value: val }),
+      });
+      msg($("dictMsg"), "已存檔 <b>" + esc(word) + "</b> → <code>" + esc(val.join(" ")) +
+        "</code>，已立刻生效（不用重啟）", "ok");
+    }
+    await dictLoad();
+    await dictLookup();
+  } catch (e) {
+    msg($("dictMsg"), "失敗：" + esc(e.message), "bad");
+    btn.disabled = false;
+  }
+}
+
+$("dictLook").addEventListener("click", dictLookup);
+dictLoad();
+
 </script>
 </body>
 </html>

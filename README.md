@@ -749,6 +749,10 @@ TTFA 與第一個 chunk 的 token 數成正比 → 切得細則延遲低。
 | `GET /tts?stream=1` 或 WebSocket | **chunked raw PCM 串流**，供低延遲播放 |
 | `POST /model` | 切換模型 / 版本，切換後自動重新暖機（§5.3、§5.4） |
 | `POST /reference` | 切換參考音訊 / 參考文本，自動重新暖機 |
+| `GET /dict` | 列出目前生效的自訂發音（中英） |
+| `POST /dict/lookup` | 查一段文字現在實際會怎麼唸，標出逐字母拼讀、整詞遮蔽、被丟掉的音素 |
+| `PUT /dict` | 新增或修改一筆發音，驗證後寫檔並**立刻生效**（不必重啟） |
+| `DELETE /dict` | 刪掉一筆並還原成 upstream 原本的讀音 |
 | `GET /` | 網頁控制台（見 §6.0） |
 | `GET /runtime` | 環境偵測：torch / CUDA 裝置 / CPU 執行緒 |
 | `GET /candidates` | 掃描可用的模型與參考音訊 |
@@ -858,19 +862,53 @@ if len(word) <= 3:
 
 掃過 30 幾個這個專案會用到的短詞，**只有 `wav` 是真的錯**。所以不做大規模改字典，只修確定錯的。
 
-**怎麼修**：加一行到 `server/pronunciation.rep`，重啟 server。
+中文那邊有**對稱**的問題與對稱的機制：g2pw 是整句推理，大多數時候對，但人名、專有名詞、罕見讀法會猜錯（`檔` 實測唸成 `dang3`，應該是 `dang4`）。
+
+| | 英文 | 中文 |
+|---|---|---|
+| upstream 熱修檔 | `text/engdict-hot.rep` | `text/g2pw/polyphonic-fix.rep` |
+| 覆寫對象 | `_g2p.cmu[word]` | `g2pw.pp_dict[word]` |
+| 單位 | ARPAbet 音素 | 拼音（帶聲調數字） |
+
+**怎麼修**：控制台的「發音字典」卡，輸入一段文字 → 每個詞列出現在的讀音 → 直接改 → **存檔立刻生效，不用重啟**。也可以直接改 `server/pronunciation.rep`：
 
 ```
-WAV W EY1 V
+[en]
+wav W EY1 V
+
+[zh]
+檔 dang4
 ```
 
-查某個詞現在怎麼唸：
+或用 API / CLI：
 
 ```bash
+curl -X PUT localhost:8000/dict -H 'Content-Type: application/json' \
+     -d '{"lang":"zh","word":"檔","value":["dang4"]}'
+curl -X POST localhost:8000/dict/lookup -H 'Content-Type: application/json' \
+     -d '{"text":"存成 wav 檔"}'
+curl -X DELETE 'localhost:8000/dict?lang=zh&word=檔'   # 還原成 upstream 的讀音
+
 python3 scripts/check_en.py wav gpu api      # 逐字母拼讀的會被標出來
-python3 scripts/check_en.py "the wav file"   # 整句
 python3 scripts/check_en.py --no-custom wav  # 看 upstream 原本的結果
 ```
+
+#### 三個會讓人白忙的坑，都在介面上標出來了
+
+**1. 整詞條目會遮蔽單字條目。** `correct_pronunciation()`（`g2pw.py:147-156`）**先查整詞，查到就直接回傳**，查不到才逐字 fallback。`pp_dict` 有 **45,046** 筆，所以這很常發生：實測把 `行` 設成 `hang2` 對 `這一行字` 完全沒反應，因為 `一行` 本身就在字典裡。控制台會把這種詞標成「整詞條目」並說明要改整個詞。
+
+**2. 中文會被誤判成日文。** `LangSegmenter` 實測把 `存成` 判成 `ja`。能正常運作是因為 `TextPreprocessor.py:166-168` 對非 en 的片段用「使用者指定的語言」而不是偵測結果：
+
+```python
+# 因无法区别中日韩文汉字,以用户输入为准
+langlist.append(language)
+```
+
+所以那些片段其實都走 `chinese2`。**這也是為什麼刪掉日文模組不會壞** —— 但也表示 `text_lang` 絕對不能開放 `auto`：`auto` 分支（`TextPreprocessor.py:148-151`）是直接用偵測結果的，`ja` 會去 import 已經刪掉的 `text.japanese`。`settings.ALLOWED_LANGS` 只收 `zh` / `en` 就是為了這個。
+
+**3. 不認識的音素會被靜默丟掉。** `replace_phs()`（`english.py:111-121`）對不在 `symbols` 裡的音素只 `print` 一行就丟掉 —— 在 server 上等於看不見，輸出少一個音而且沒有任何錯誤。
+
+→ 兩道防線：寫入時 `preflight()` 就擋掉並指名是哪個字的哪個音素；執行期用 `install_drop_recorder()` 包住 `replace_phs` 記錄實際發生的丟失，`POST /tts` 回 `X-Dropped-Phones` 標頭、`/metrics` 有 `dropped_phones`、控制台有「被丟掉的音素」卡。包裝後的回傳值**一律來自原函式**，所以音訊輸出完全沒變。
 
 **為什麼不直接改 `text/engdict-hot.rep`**：upstream 自己留了那個熱修字典（裡面已經有 CHATGPT、JSON、CONDA），`get_dict()` 會在讀完 cache 之後無條件套用。但它在 vendored 樹裡、被 `manifest.txt` 管著，`vendor_upstream.sh` 會重新複製，手改會被蓋掉。所以 `pronunciation.py` 用同樣的手法（覆寫 `_g2p.cmu` 的條目），資料放在 vendored 樹之外，upstream 一個字都不用改。
 
@@ -1136,14 +1174,14 @@ nltk_data/                英文前端的 nltk 語料（下載而來，不進 gi
 
 server/
   config.yaml             設定；可用 GSV_* 環境變數覆寫
-  pronunciation.rep       自訂英文發音（本專案的檔案，不是 vendored）
+  pronunciation.rep       自訂中英發音（本專案的檔案，不是 vendored）
   GPT_SoVITS/             vendored upstream —— 原封不動，不改
   tools/                  vendored upstream —— 原封不動，不改
   gsv_server/             本專案自己的程式碼
     bootstrap.py          建立 upstream 預期的 sys.path 與工作目錄
     settings.py           設定載入與驗證
     bert_trim.py          BERT 等價剪裁
-    pronunciation.py      自訂英文發音的載入、驗證與套用
+    pronunciation.py      自訂中英發音：載入、驗證、套用、查詢、音素丟失記錄
     engine.py             暖機、快取、量測、GPU 操作序列化
     api.py                HTTP + WebSocket
     console.html          網頁控制台（單一檔、零外部依賴）

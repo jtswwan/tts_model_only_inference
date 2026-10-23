@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import wavio
+from . import pronunciation, wavio
 from .engine import Engine, PreflightError, preflight
 from .settings import ALLOWED_LANGS, Settings, load
 
@@ -65,6 +65,17 @@ class ModelRequest(BaseModel):
     vits: str | None = Field(None, description="SoVITS (s2) 權重路徑")
     device: str | None = Field(None, description="auto / cpu / cuda / cuda:0 …")
     is_half: bool | None = Field(None, description="fp16。CPU 上會被 upstream 強制關閉")
+
+
+class DictRequest(BaseModel):
+    lang: str = Field(..., description="en 或 zh")
+    word: str = Field(..., min_length=1)
+    # 英文是 ARPAbet 音素（["W","EY1","V"]），中文是拼音（["dang4"]）
+    value: list[str] = Field(..., min_length=1)
+
+
+class LookupRequest(BaseModel):
+    text: str = Field(..., min_length=1)
 
 
 class ReferenceRequest(BaseModel):
@@ -147,6 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _check_profile(req.profile)
         if req.format not in ("wav", "pcm"):
             raise HTTPException(status_code=400, detail="format 只接受 wav 或 pcm")
+        drop_cursor = pronunciation.drop_cursor()
         try:
             sr, pcm, ttfa = _collect(req.text, req.text_lang, req.profile)
         except HTTPException:
@@ -162,6 +174,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "X-TTFA-Ms": f"{ttfa * 1000:.1f}",
             "X-Audio-Seconds": f"{len(pcm) / 2 / sr:.3f}",
         }
+        # upstream 的 replace_phs() 把不認識的音素靜默丟掉（只 print 一行）。
+        # 那在 server 上等於看不見，所以這裡一定要回報出來。
+        dropped = pronunciation.drops_since(drop_cursor)
+        if dropped:
+            headers["X-Dropped-Phones"] = " ".join(dropped)
         if req.format == "pcm":
             return Response(content=pcm, media_type=f"{PCM_MEDIA_TYPE};rate={sr};channels=1", headers=headers)
         return Response(content=wavio.wrap(sr, pcm), media_type="audio/wav", headers=headers)
@@ -192,6 +209,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if buf:
                 yield bytes(buf)
 
+        # 串流的標頭在產生第一塊音訊之前就送出，所以這裡還不知道會不會丟音素。
+        # 用 trailer 不可靠（很多客戶端不讀），所以改成：丟掉的音素記在
+        # /metrics 的 dropped_phones 裡，由控制台輪詢顯示。
         return StreamingResponse(
             body(),
             media_type=f"{PCM_MEDIA_TYPE};rate={sr};channels=1",
@@ -509,5 +529,60 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 log.exception("還原參考音訊也失敗")
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
         return eng.status()
+
+    # ---- 字典 ----
+    #
+    # 為什麼需要這組端點：英文的 english.py:322 對「不在字典裡、長度 <= 3」的
+    # 詞一律逐字母拼讀（wav 唸成 W-A-V），中文的 g2pw 遇到人名與專有名詞會猜錯
+    # 聲調。兩邊都要能當場改、當場生效，而不是每次都得改檔案重啟。
+
+    @app.get("/dict", summary="列出目前生效的自訂發音")
+    def dict_list() -> dict[str, Any]:
+        entries = pronunciation.load()
+        return {
+            "path": str(pronunciation.DEFAULT_PATH),
+            "entries": entries,
+            "counts": {lang: len(entries.get(lang, {})) for lang in pronunciation.LANGS},
+            "recent_dropped_phones": pronunciation.recent_drops(),
+        }
+
+    @app.post("/dict/lookup", summary="查一段文字現在實際會怎麼唸")
+    def dict_lookup(req: LookupRequest) -> dict[str, Any]:
+        try:
+            return pronunciation.lookup(req.text)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("查詢發音失敗")
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+
+    @app.put("/dict", summary="新增或修改一筆自訂發音（立刻生效，不必重啟）")
+    def dict_put(req: DictRequest) -> dict[str, Any]:
+        eng = engine()
+        try:
+            with _switch_lock:
+                entries = pronunciation.upsert(req.lang, req.word, req.value)
+                eng.custom_pronunciations = entries
+        except pronunciation.PronunciationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            log.exception("寫入自訂發音失敗")
+            raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+        return {
+            "entries": entries,
+            "lookup": pronunciation.lookup(req.word, entries),
+        }
+
+    @app.delete("/dict", summary="刪掉一筆自訂發音並還原成 upstream 原本的讀音")
+    def dict_delete(
+        lang: str = Query(..., description="en 或 zh"),
+        word: str = Query(..., min_length=1),
+    ) -> dict[str, Any]:
+        eng = engine()
+        try:
+            with _switch_lock:
+                entries = pronunciation.remove(lang, word)
+                eng.custom_pronunciations = entries
+        except pronunciation.PronunciationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"entries": entries, "lookup": pronunciation.lookup(word, entries)}
 
     return app

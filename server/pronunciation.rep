@@ -1,20 +1,22 @@
-# 自訂英文發音 —— 本專案自己的檔案，不是 vendored upstream
+# 自訂發音 —— 本專案自己的檔案，不是 vendored upstream
 #
-# 為什麼需要這個檔案：
-#   text/english.py:322 的 qryword() 對「不在字典裡、長度 <= 3」的詞一律
-#   逐字母拼讀。那對縮寫是對的（GPU 唸 G-P-U、PNG 唸 P-N-G），但對剛好能
-#   當單字唸的詞就錯了 —— "wav" 會被唸成 "double-u ay vee"。
+# 這個檔案可以用控制台的「字典」頁編輯，也可以直接手改（改完重啟 server，
+# 或用 PUT /dict 讓它立刻生效）。
 #
-# 為什麼不直接改 GPT_SoVITS/text/engdict-hot.rep：
-#   那是 vendored upstream 檔案，scripts/vendor_upstream.sh 會依 manifest
-#   重新複製，手改會被蓋掉。這個檔案在 vendored 樹之外，不會。
+# [en] 英文：單字 後面接大寫 ARPAbet 音素，空白分隔，重音用 0/1/2 標在母音後。
+#      為什麼需要：english.py:322 對「不在字典裡、長度 <= 3」的詞一律逐字母
+#      拼讀。那對 GPU / PNG 是對的，對 wav 就錯了。
 #
-# 格式（和 upstream 的 engdict-hot.rep 相同）：
-#   單字 大寫 ARPAbet 音素，空白分隔。重音用數字 0/1/2 標在母音後面。
-#   音素必須是 text/symbols2.py 裡有的 —— 不是的話載入時會明確失敗，
-#   而不是像 replace_phs() 那樣靜默丟掉。
+# [zh] 中文：詞 後面接拼音，空白分隔，聲調用數字。拼音數量必須等於字數。
+#      為什麼需要：g2pw 整句推理大多正確，但人名與專有名詞會猜錯。
 #
-# 改完要重啟 server（或呼叫 /model）才會生效。
-# 想確認某個詞現在怎麼唸：python3 scripts/check_en.py wav
+# 音素 / 拼音都會在載入時驗證 —— 打錯會明確失敗，而不是像 upstream 的
+# replace_phs() 那樣靜默把音丟掉。
+#
+# 查某個詞現在怎麼唸：python3 scripts/check_en.py <詞>
 
-WAV W EY1 V
+
+[en]
+wav W EY1 V
+
+[zh]

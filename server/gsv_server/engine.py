@@ -142,7 +142,7 @@ def preflight(settings: Settings) -> dict[str, Any]:
     # 自訂發音檔壞掉要當場失敗。replace_phs() 對不認識的音素是靜默丟掉的，
     # 所以放過一個打錯的音素，結果是那個字少一個音而且沒有任何錯誤訊息。
     try:
-        detected["custom_pronunciations"] = sorted(pronunciation.load())
+        detected["custom_pronunciations"] = pronunciation.flatten(pronunciation.load())
     except pronunciation.PronunciationError as exc:
         problems.append(str(exc))
         detected["custom_pronunciations"] = []
@@ -318,7 +318,8 @@ class Engine:
         self.audio_seconds_total = 0.0
 
         # preflight() 已經讀過並驗證過了，這裡沿用同一份，不重讀檔案
-        self.custom_pronunciations: dict[str, list[str]] = {}
+        self.custom_pronunciations: dict[str, dict[str, list[str]]] = {}
+        self.pronunciation_counts: dict[str, int] = {}
 
         self.detected = preflight(settings)
         if self.detected:
@@ -443,6 +444,10 @@ class Engine:
             self._warm_english_frontend()
             timings["english_frontend"] = time.perf_counter() - t0
 
+        t0 = time.perf_counter()
+        self._apply_custom_pronunciations()
+        timings["pronunciation"] = time.perf_counter() - t0
+
         if self.settings.latency.warmup_dummy_run:
             # 第一次真實推論會付掉 CUDA kernel、cuDNN autotune、onnxruntime
             # session 初始化、jieba 詞典載入等一次性成本。在這裡付掉，
@@ -473,10 +478,6 @@ class Engine:
 
         try:
             clean_text("warm up", "en", self.config.version)
-            # text.english 這時才真的被 import 進來，_g2p 也才存在，
-            # 所以自訂發音要在這之後才套用得上。檔案本身在 preflight()
-            # 就驗證過了，這裡只負責合併。
-            pronunciation.apply(self.custom_pronunciations)
         except Exception as exc:  # noqa: BLE001
             # 缺 nltk 語料時這裡會失敗。不讓它擋住啟動 —— 中文合成不受影響，
             # 但要講清楚英文會在請求路徑上失敗，而不是等到串流中途才爆。
@@ -485,6 +486,33 @@ class Engine:
                 " 請執行 scripts/fetch_models.sh 或 python scripts/start.py 補上 nltk 語料。",
                 exc,
             )
+
+    def _apply_custom_pronunciations(self) -> None:
+        """把 server/pronunciation.rep 覆寫進 upstream 的兩個字典。
+
+        必須在 `text.english` 與 `text.g2pw.g2pw` 都 import 之後 —— 前者由
+        `_warm_english_frontend()` 帶進來，後者由 `apply()` 自己 import
+        （`pp_dict` 是 g2pw.py 的模組層級全域，誰先 import 都是同一個物件，
+        而這裡是就地改內容而不是重新綁定，所以 `correct_pronunciation()`
+        看得到）。
+
+        檔案在 `preflight()` 就讀過並驗證過了，這裡只負責合併。
+        """
+        # 記錄器要在 text.english import 之後安裝。即使沒有自訂發音也要裝 ——
+        # 被丟掉的音素和有沒有自訂發音無關。
+        try:
+            pronunciation.install_drop_recorder()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("音素丟失記錄器安裝失敗：%s", exc)
+
+        if not self.custom_pronunciations:
+            return
+        try:
+            counts = pronunciation.apply(self.custom_pronunciations)
+            self.pronunciation_counts = counts
+        except Exception as exc:  # noqa: BLE001
+            # 不讓它擋住啟動，但要講清楚：自訂發音沒生效，輸出會是 upstream 的
+            log.warning("自訂發音套用失敗：%s。輸出會是 upstream 原本的發音。", exc)
 
     def set_reference(self) -> dict[str, float]:
         """換掉參考音訊並重新暖機。
@@ -666,6 +694,10 @@ class Engine:
             "uptime_seconds": round(time.time() - self.started_at, 1),
             "requests_total": self.requests_total,
             "audio_seconds_total": round(self.audio_seconds_total, 2),
+            # upstream 的 replace_phs() 把不認識的音素靜默丟掉，只 print 一行。
+            # 串流的標頭在第一塊音訊之前就送出，來不及帶這個資訊，所以放在
+            # metrics 裡讓控制台顯示。
+            "dropped_phones": pronunciation.recent_drops(),
             "history": list(self.history),
         }
 
@@ -674,7 +706,7 @@ class Engine:
         return {
             "warm": self.warm,
             "english_ready": english_frontend_ready(),
-            "custom_pronunciations": sorted(self.custom_pronunciations),
+            "custom_pronunciations": pronunciation.flatten(self.custom_pronunciations),
             "version": self.config.version,
             "device": str(self.config.device),
             "is_half": self.config.is_half,
