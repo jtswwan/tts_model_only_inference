@@ -4,15 +4,17 @@ GPT-SoVITS 的**純推論** server。單一目標：**超低延遲**。
 
 主力走 **v2Pro**（單次前向，無 CFM），v4 作為品質比較與離線用途保留。模型可換。邊緣設備以網路連線使用，**不在設備上跑推論**。
 
-> **狀態：計劃階段，尚無程式碼。**
+> **狀態：server 已實作，尚未在 GPU 上實測。**
 > 本文件記錄完整設計決策與依據。所有結論附原始碼行號或官方文件原文，不憑印象。
-> 程式碼落地後補上「使用方式」章節。
+> 開發環境無 GPU（見 §11.1），因此音質與延遲**必須在目標機器上實測**才算完成。
+> 初版計劃中被實作推翻的結論，都保留在原處標明修正，不無聲刪除。
 
 ---
 
 ## 目錄
 
 - [0. 範圍](#0-範圍)
+- [使用方式](#使用方式)
 - [1. 為什麼重做](#1-為什麼重做)
 - [2. 洛神模型的事實](#2-洛神模型的事實)
 - [3. 為什麼主力是 v2Pro](#3-為什麼主力是-v2pro)
@@ -26,6 +28,7 @@ GPT-SoVITS 的**純推論** server。單一目標：**超低延遲**。
 - [11. 驗證策略](#11-驗證策略)
 - [12. 未決事項](#12-未決事項)
 - [13. 引用來源](#13-引用來源)
+- [附錄：改這個專案前必讀](#附錄改這個專案前必讀)
 
 ---
 
@@ -48,6 +51,73 @@ GPT-SoVITS 的**純推論** server。單一目標：**超低延遲**。
 初版計劃曾包含一個「在邊緣設備上離線跑的極簡版」。該範圍已取消 —— 邊緣設備改為連線使用。
 
 這個變更移除了大量複雜度：原本為邊緣版設計的「參考音訊衍生物離線預算成常數檔」，在 server 上用**啟動時暖機 `prompt_cache`** 就能達到完全相同的效果（見 §5.3），而且 upstream 已有現成機制。
+
+---
+
+## 使用方式
+
+```bash
+# 1. 取出 upstream 的推論子集（已 commit，通常不需要重跑）
+scripts/vendor_upstream.sh <upstream-checkout> server
+
+# 2. 驗證剪枝沒有造成斷鏈
+python scripts/import_graph.py server --verify
+
+# 3. 安裝依賴
+pip install -r requirements.txt
+
+# 4. 下載權重（只抓 PyTorch 格式）
+scripts/fetch_models.sh
+
+# 5. 驗證等價優化真的等價（需要 GPU）
+python scripts/verify_equivalence.py
+
+# 6. 啟動
+python -m gsv_server            # 在 server/ 目錄下
+```
+
+啟動只有這一條路徑。**不要用 `uvicorn gsv_server.api:app`** —— `app` 需要帶著設定建構，而 `bootstrap` 必須在 import upstream 之前完成。前一版正是因為「用什麼指令啟動」會改變實際執行的程式碼而出問題（§1.1）。
+
+### API
+
+```bash
+# 完整音檔
+curl -X POST http://localhost:8000/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "慢慢來也沒關係，只要沒有停下來，你其實一直都在前進。"}' \
+  -o out.wav
+
+# 串流 raw PCM（s16le 單聲道，取樣率在 X-Sample-Rate 標頭）
+curl -N 'http://localhost:8000/tts/stream?text=你好' -o out.pcm
+
+# 狀態與延遲量測
+curl http://localhost:8000/health
+curl http://localhost:8000/metrics
+
+# 切換模型 / 參考音訊（都會重新暖機）
+curl -X POST http://localhost:8000/model     -d '{"version":"v4","vits":"...s2Gv4 的洛神 LoRA.pth"}'
+curl -X POST http://localhost:8000/reference -d '{"audio":"...wav","text":"參考文本"}'
+```
+
+WebSocket `/tts/ws`：送 `{"text": "..."}`，收到 `{"event":"begin",...}`、多個二進位 PCM 區塊、最後 `{"event":"end","ttfa_ms":...}`。
+
+### 量延遲
+
+```bash
+python scripts/bench.py --url http://localhost:8000 --profiles quality,low
+```
+
+量的是**客戶端收到第一個 byte 的時間**，不是伺服器自己回報的數字。同時回報「即時倍率」—— 大於 1 表示生成快於播放，串流可以不中斷。
+
+### 設定
+
+`server/config.yaml`，任何一項都可用環境變數覆寫（雙底線代表層級）：
+
+```bash
+GSV_LATENCY__PROFILE=low GSV_SERVER__PORT=9000 python -m gsv_server
+```
+
+未知的設定鍵會直接報錯，不會被安靜忽略。
 
 ---
 
@@ -254,7 +324,7 @@ head2version = {
 | | **v2Pro** 【主力】 | **v4** 【備用】 |
 |---|---|---|
 | Synthesizer | `SynthesizerTrn`（`TTS.py:539`） | `SynthesizerTrnV3`（`TTS.py:548`） |
-| semantic → 音訊 | **單次前向**，`use_vocoder = False`（`TTS.py:545`） | CFM flow-matching **8 步 ODE**，再過獨立 HiFiGAN vocoder |
+| semantic → 音訊 | **單次前向**，`use_vocoder = False`（`TTS.py:545`） | CFM flow-matching **ODE 預設 32 步**（`sample_steps`，`TTS.py:1057`），再過獨立 HiFiGAN vocoder |
 | 輸出取樣率 | 32 kHz | 48 kHz |
 | 權重需求 | **單檔 134.9 MB，完整** | LoRA 75.5 MB + 底模 769 MB + vocoder 58 MB，需 merge |
 | 載入成本 | 直接載入 | 載底模 → 套 LoRA → `merge_and_unload()` |
@@ -311,8 +381,23 @@ GPT-SoVITS 官方 README「V2Pro Release Notes」原文：
 | 移除 BERT 的 MLM 輸出頭（§5.5） | 21128×1024 的詞表投影，輸出從頭到尾沒被使用 |
 | 英文不呼叫 BERT（§5.6） | `TextPreprocessor.py:215-218` 對非中文**本來就回傳 `torch.zeros`**。不呼叫與呼叫後丟棄等價 |
 | 文字前端結果按文本快取（§5.7） | 同一文本 → 同一音素序列與 BERT 特徵 |
-| 拆除 `pytorch-lightning` 包裝 | 推論只用到 `t2s_model.Text2SemanticDecoder`。`LightningModule` 只是訓練期外殼 |
 | 刪除訓練 / 匯出 / 其他介面程式碼（§7） | 推論路徑不經過 |
+
+### ❌ 原計劃中被否決的項目
+
+以下是初版計劃列為「會做」、但實作時查證後證明做不到或代價不符的。留在這裡
+是為了不讓被推翻的結論無聲消失。
+
+| 原計劃項目 | 為何否決 |
+|---|---|
+| 拆除 `pytorch-lightning` 包裝 | **做不到。** `TTS.py:24` import 的是 `AR/models/t2s_lightning_module.py` 的 `Text2SemanticLightningModule`，而它繼承 `LightningModule`。要拆就得改 upstream 的檔案。所幸 PL 只在啟動時 import 一次，**不影響 TTFA**，保留它對低延遲目標沒有損失 |
+| 移除 `torchmetrics` | **做不到。** `AR/models/t2s_model.py` 直接 import，是 AR 模型本體在用，不是訓練殘留 |
+| 移除 `matplotlib` | **做不到。** `BigVGAN/utils0.py`、`GPT_SoVITS/utils.py`、`AR/modules/lr_schedulers.py` 三個都在可達集合內 |
+| 移除 `x_transformers` | **做不到。** `module/models.py:13` 無條件 `from f5_tts.model import DiT`，連只跑 v2Pro 也躲不掉 |
+| 砍 `BigVGAN/` | **做不到。** `TTS.py:25` 無條件 import，與是否使用 v3 無關。程式碼留（364 K），權重不下載 |
+| 砍 `tools/AP_BWE_main/` | **做不到。** `TTS.py:33` import `tools/audio_sr.py`，後者 `sys.path.append` 後載入它 |
+| 砍 `module/{ddp_utils,distrib}.py` | **做不到。** `core_vq.py:42-43` 直接 import，不是訓練專用 |
+| 用自寫分段器取代 `LangSegmenter` | 見下方類別二。另外實作時發現 `langsegmenter.py` 已有 `full_en()` / `full_cjk()` 的 regex 快速路徑，純中文或純英文根本不會呼叫 lid 模型，省下的只有混語情境 |
 
 ### ⚠️ 類別二：會改變輸出 —— 不做，或做成預設關閉的明確選項
 
@@ -357,21 +442,46 @@ TTFA ≈ 文字前端 + (第一個 chunk 的 token 數 × 每 token 時間) + �
 
 分母上的每一項都要壓，而且 **chunk 要小**。
 
-### 5.2 串流：用 upstream 的實作，不自己寫
+### 5.2 串流：用 upstream 的實作，但它有品質代價
 
-`TTS.py:1068`：
+**必須先修正初版計劃的一個錯誤說法。** 初版寫「串流用 upstream 現成的 `decode_streaming` 即可，不影響音質」—— 這是錯的。upstream 在 `TTS.py:1026-1033` 對自家參數的標註寫得很清楚：
 
-```python
-elif not parallel_infer and streaming_mode and not self.configs.use_vocoder:
+```
+"return_fragment": False,     # (Best Quality, Slowest response speed. old version of streaming mode)
+"streaming_mode": False,      # return audio chunk by chunk. (Medium quality, Slow response speed)
+"fixed_length_chunk": False,  # (lower quality, faster response speed)
 ```
 
-`TTS.py:1431`：
+`streaming_mode` 被作者自己標為 **Medium quality**。推測原因是 `decode_streaming` 以 `overlap_length` 預設僅 2 個 semantic token 的重疊分塊解碼，VITS decoder 每塊看到的上下文比全序列解碼少，邊界會有瑕疵。
 
-```python
-audio_chunk, latent, latent_mask = self.vits_model.decode_streaming(..., sv_emb=sv_emb, ...)
-```
+反而 `return_fragment` 被標為 **Best Quality** —— 它是逐段完整解碼後逐段吐出。
 
-條件 `not self.configs.use_vocoder` 表示**串流只在 v2Pro / v2 這條（無獨立 vocoder）路上可用**。這是 §3.1 說「串流只有 v2Pro 有」的原始碼依據。
+更關鍵的是，模式選擇會**換掉 AR 解碼的實作**（`TTS.py:1066-1083`）：
+
+| 設定 | AR 實作 |
+|---|---|
+| `parallel_infer=True, streaming_mode=False`（upstream 預設） | `infer_panel_batch_infer` |
+| `streaming_mode=True`（強制 `parallel_infer=False`） | `infer_panel_naive` |
+| 兩者皆關 | `infer_panel_naive_batched` |
+
+三條是不同的程式碼路徑，批次與 padding 行為不同，即使固定 seed 也可能產生不同音訊。
+
+此外 `return_fragment` 與 `streaming_mode` 互斥（`TTS.py:1087-1089` 會強制關掉前者），而兩者都會強制關閉 `split_bucket`（`:1091-1093`）。
+
+**因此本專案的延遲梯度如下，並以 profile 明確區分：**
+
+| profile | 設定 | upstream 自評品質 | TTFA |
+|---|---|---|---|
+| （都關，非本專案選項） | — | 基準 | 最差，要等全文 |
+| **`quality`（預設）** | `return_fragment=True` + `parallel_infer=True` | **Best Quality** | 第一段合成完 |
+| `low` | `streaming_mode=True`（`parallel_infer` 被強制關） | Medium quality | 更低 |
+| `low` + `fixed_length_chunk` | 同上再加該旗標 | lower quality | 最低 |
+
+預設 `quality`：`return_fragment=True` 且保持 `parallel_infer=True`，使 AR 走 `infer_panel_batch_infer` —— **與 upstream 預設同一條路徑**，同時獲得逐段串流。
+
+`low` 必須明確設定才會啟用。不為了延遲偷偷犧牲音質。
+
+另外注意：`streaming_mode` 只在 `not self.configs.use_vocoder` 時可用（`TTS.py:1068`），也就是**只有 v2Pro / v2 這條路有**。v4 設了會被 upstream 自動退回 `return_fragment`（`:1071-1073`），所以本專案在設定驗證階段就直接拒絕 `v4 + profile=low` 的組合。
 
 註：`GPT_SoVITS/stream_v2pro.py` **不採用**。它第一行自述「这是一个实验性质的实现」，且建構在 `torch.jit` 匯出之上。
 
@@ -418,7 +528,15 @@ audio = self.vits_model.decode(pred_semantic, phones, refer_audio_spec,
 2. **用 `AutoModelForMaskedLM` 載入，但 MLM 輸出頭從未被使用**。那是 21128×1024 的詞表投影。
    → **整個移除**
 
-兩項合計約 47 M 參數。對延遲的貢獻在階段 1。
+另外 `BertModel` 預設會算 `pooler_output`，也沒被使用 → 一併移除（`base.pooler = None`，`BertModel.forward` 對 `None` 有判斷）。
+
+**初版計劃估的「約 47 M 參數」偏高，要修正。** `chinese-roberta-wwm-ext-large` 的詞表投影權重與 input embeddings 是綁定的（`tie_word_embeddings`），所以移除 MLM 頭省下的是 transform 那一層與 bias，不是整個 21128×1024 的詞表矩陣。實際省下的是「2 層 encoder + MLM transform + pooler」。
+
+不過**跳過 MLM 頭的每次請求計算省下來了** —— 那個 1024→21128 的矩陣乘法是按序列長度計費的，即使權重與 embeddings 共用也還是要算。
+
+確切數字由 `scripts/verify_equivalence.py` 實測印出，不在此寫死估計值。
+
+**負索引的陷阱**：單純把 encoder 截到 `num_layers - 2` 層是**不等價**的。截完以後 `hidden_states` 只有 `num_layers - 1` 個元素，`[-3]` 會指到更前面的層。所以截層後必須把 `hidden_states` 補回原本的長度（重複最後一個元素），`[-3]` 才仍落在同一層的輸出上。實作見 `server/gsv_server/bert_trim.py`。
 
 ### 5.6 英文不走 BERT
 
@@ -534,7 +652,11 @@ v4：                 f5_tts/model/
 
 ### 移除
 
-`tensorboard`、`pytorch-lightning`（§4）、`gradio`、`funasr`、`faster-whisper`、`ctranslate2`、`modelscope`、`torchmetrics`、`av`、`pyopenjtalk`、`g2pk2`、`ko_pron`、`ToJyutping`、`python_mecab_ko`
+`tensorboard`、`gradio`、`funasr`、`faster-whisper`、`ctranslate2`、`modelscope`、`av`、`pyopenjtalk`、`g2pk2`、`ko_pron`、`ToJyutping`、`python_mecab_ko`、`sentencepiece`、`chardet`、`psutil`、`rotary_embedding_torch`
+
+**不能移除**（見 §4 的「原計劃中被否決的項目」）：`pytorch-lightning`、`torchmetrics`、`matplotlib`、`x_transformers`、`huggingface_hub`、`requests`。
+
+清單由 `scripts/import_graph.py` 掃出 `server/` 實際 import 的外部套件而來，不是從 upstream 的 `requirements.txt` 抄改。
 
 ### 保留
 
@@ -573,10 +695,30 @@ v4：                 f5_tts/model/
 ## 10. Repo 結構
 
 ```
-server/    推論 server。多版本 + 可換模型 + 串流
-tools/     暖機 / 基準測試 / 等價性驗證腳本
-docs/      設計決策記錄
+requirements.txt          由 import 圖掃出，非從 upstream 抄改
+
+server/
+  config.yaml             設定；可用 GSV_* 環境變數覆寫
+  GPT_SoVITS/             vendored upstream —— 原封不動，不改
+  tools/                  vendored upstream —— 原封不動，不改
+  gsv_server/             本專案自己的程式碼
+    bootstrap.py          建立 upstream 預期的 sys.path 與工作目錄
+    settings.py           設定載入與驗證
+    bert_trim.py          BERT 等價剪裁
+    engine.py             暖機、快取、量測、GPU 操作序列化
+    api.py                HTTP + WebSocket
+    wavio.py              最小 WAV 封裝
+    __main__.py           唯一的啟動進入點
+
+scripts/
+  vendor_upstream.sh      從 upstream 取出推論子集
+  import_graph.py         可達性分析 / 剪枝後的斷鏈驗證
+  fetch_models.sh         下載權重（只抓 PyTorch 格式）
+  verify_equivalence.py   實測等價優化是否真的等價（需 GPU）
+  bench.py                量 TTFA（只用標準庫）
 ```
+
+`server/GPT_SoVITS/` 與 `server/tools/` 底下的檔案**一律不修改**。需要改變行為時，一律在 `gsv_server/` 這一層處理（例如工作目錄、BERT 替換、快取包裝），而不是去動 upstream 的程式碼。這是為了讓 upstream 更新時能直接重跑 `vendor_upstream.sh` 而不需要重新 rebase 任何修改。
 
 ---
 
@@ -609,7 +751,6 @@ docs/      設計決策記錄
 | 移除 MLM 頭 | 同上 |
 | 英文零 BERT | 與呼叫 BERT 後丟棄的結果比對 |
 | 文字前端快取 | 快取命中與未命中的 `(phones, bert_features, norm_text)` 比對 |
-| 拆 pytorch-lightning | 同一輸入下 `infer_panel` 輸出比對（固定 seed） |
 
 ### 11.3 端到端比對
 
@@ -637,7 +778,9 @@ docs/      設計決策記錄
 | 4 | **v2ProPlus** | 若能取得洛神的 v2ProPlus 權重（檔頭 `06`），應一併實測 |
 | 5 | **參考音訊是否固定** | §5.3 的暖機效益取決於參考音訊的變動頻率。若每次請求都換參考音訊，該優化失效 |
 
-第 2 項是現在最需要你回答的 —— 「超低延遲」沒有數字的話，無法判斷 §4 類別一的等價優化是否已足夠，或是否需要動用會影響音質的手段。
+第 2 項仍是最關鍵的 —— 「超低延遲」沒有目標數字的話，無法判斷 §4 類別一的等價優化是否已足夠，或是否需要動用會影響音質的手段（`profile=low`、更細的切句）。
+
+**下一步**：在目標機器上依序執行 `scripts/verify_equivalence.py`（確認等價性成立）與 `scripts/bench.py`（取得 TTFA 實測值），再據以決定要不要動用類別二的手段。在有實測數字之前，不預先犧牲任何音質。
 
 ---
 
@@ -657,3 +800,42 @@ docs/      設計決策記錄
 - GPT-SoVITS：https://github.com/RVC-Boss/GPT-SoVITS
 - 版本特性原文：官方 README「V2Pro Release Notes」、「V4 Release Notes」
 - 本文件所有行號引用皆對應 upstream `main` 分支（基底 commit 將於程式碼落地時釘選）
+
+---
+
+## 附錄：改這個專案前必讀
+
+四個讀原始碼才看得到、憑經驗寫一定會踩的地方。都已在程式碼註解中標明，
+這裡集中列出。
+
+### 1. `TTS_Config` 只讀 `"custom"` 鍵
+
+`TTS.py:304-306`：
+
+```python
+configs_ = deepcopy(self.default_configs)
+configs_.update(configs)
+self.configs = configs_.get("custom", configs_["v2"])
+```
+
+把設定平鋪傳入（`{"device":..., "version":"v2Pro", ...}`）會被 `update` 放到最外層，然後因為沒有 `"custom"` 鍵而**整組被忽略、退回 v2 的預設值**。不會報錯，只會安靜地載入錯誤的模型。正確形式是 `{"custom": {...}}`。
+
+### 2. `text_lang` 不可用 `"auto"`
+
+`TextPreprocessor.py:148-150` 的 `auto` 分支會原樣採用偵測到的語言（`langlist.append(tmp["lang"])`），一旦判為日文或韓文就去 import `text/japanese.py` 或 `korean.py` —— 這兩個模組已在 vendoring 時移除（本專案只支援中英文），會直接 ImportError。
+
+正確值是 `"zh"`。upstream 的註解是「按中英混合识别」，走 `TextPreprocessor.py:157-169` 的 else 分支，該分支對非英文段落一律以傳入的 `language` 覆蓋（註解：「因无法区别中日韩文汉字,以用户输入为准」），因此只會載入 `chinese2` 與 `english` 兩個模組。
+
+設定驗證會攔下 `auto`（`settings.py` 的 `ALLOWED_LANGS`）。
+
+### 3. BERT 截層的負索引陷阱
+
+`TextPreprocessor.py:197` 取 `hidden_states[-3]`，是**負索引**。單純把 encoder 截短，`hidden_states` 的長度跟著變，`[-3]` 就會指到更前面的層，輸出不再相同。截層後必須把 `hidden_states` 補回原長度。見 `server/gsv_server/bert_trim.py`。
+
+### 4. 串流模式有品質代價，而且會換掉 AR 實作
+
+upstream 在 `TTS.py:1026-1033` 自己標註 `streaming_mode` 是 "Medium quality"、`fixed_length_chunk` 是 "lower quality"、`return_fragment` 是 "Best Quality"。並且模式選擇會在 `infer_panel_batch_infer` / `infer_panel_naive` / `infer_panel_naive_batched` 之間切換（`:1066-1083`），是不同的程式碼路徑。詳見 §5.2。
+
+### 另外：工作目錄是有意義的
+
+`TTS.py:13` 在模組層級執行 `now_dir = os.getcwd()`，`sv.py:5-6` 用 `os.getcwd()` 組出 eres2net 與 SV 權重路徑，`text/chinese2.py:35` 寫死相對路徑 `"GPT_SoVITS/text/G2PWModel"`。所以 `bootstrap.setup()` 必須在 import 任何 upstream 模組**之前**完成。修這些相對路徑的替代做法是改 upstream 的檔案，本專案選擇不改。
