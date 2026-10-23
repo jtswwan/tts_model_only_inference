@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 模型權重（體積過大，另行下載）
+*.pth
+*.ckpt
+*.bin
+*.onnx
+*.safetensors
+*.pt
+
+# 輸出
+output/
+*.wav
+!docs/**/*.wav
+
+# 工具
+.DS_Store
+.idea/
+.vscode/
