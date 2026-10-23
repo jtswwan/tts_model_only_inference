@@ -57,6 +57,12 @@ latency:
   text_split_method: cut1
   fragment_interval: 0.3
 
+  # 中英切換處的多餘停頓上限（毫秒）。0 = 關閉。
+  # 只在「有中英邊界且句中沒有停頓標點」時啟用 —— 有標點時那些停頓是該有的。
+  # 這是對輸出音訊的後處理（合成本身完全不變），但它確實改變輸出，
+  # 所以會列在 /health 的 quality.deviations 裡。
+  max_language_gap_ms: 120
+
   # 僅 profile=low 時生效
   overlap_length: 2
   min_chunk_length: 16

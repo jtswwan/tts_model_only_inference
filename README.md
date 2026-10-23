@@ -160,6 +160,44 @@ CPU 版實測 **4.91 GB**（Python 與套件 2.04 GB + 程式碼與權重 2.87 G
 
 CPU 版總計約 **4.7 GB**。
 
+#### fp16 的 BERT：GPU 上省 582 MB，而且是逐位元相同
+
+`TTS.py:490-491` 在 GPU 上本來就會把整個 BERT 轉成 fp16：
+
+```python
+if self.configs.is_half and str(self.configs.device) != "cpu":
+    self.bert_model = self.bert_model.half()
+```
+
+所以 GPU 模式的流程是「硬碟 fp32 → 載入 → 轉 fp16 → 拿去算」。先轉好存起來，流程變成「硬碟 fp16 → 載入 → 轉 fp16（無動作）→ 拿去算」。
+
+`fp32 → fp16` 是**確定性**轉換：同一個 fp32 數字不管轉幾次、在哪裡轉，都得到同一個 fp16 數字。所以兩條路徑的權重**逐位元相同** —— 不是「差不多」、不是「聽不出來」，是完全一樣，音質不可能變。`scripts/make_fp16.py` 會實際比對（實測 **399/399 個張量逐位元相同**，1.2 GB → 665 MB）。
+
+```bash
+python3 scripts/make_fp16.py            # 產生並驗證
+python3 scripts/make_fp16.py --verify   # 只驗證
+```
+
+**CPU 上不能用。** CPU 的 `is_half` 是 False，那個 `.half()` 不會執行，BERT 用 fp32 跑。這時給它 fp16 的檔案，transformers 會上轉回 fp32 —— 數值變成「fp16 精度裝在 fp32 容器裡」，那是實實在在的精度損失。
+
+所以**兩份都留著，由 `engine.resolve_bert_path()` 依裝置挑**：
+
+| 裝置 | `is_half` | 用哪一份 |
+|---|---|---|
+| CPU | False | fp32 |
+| GPU | True | **fp16**（省 582 MB） |
+| GPU | False | fp32 |
+
+把 `models.bert` 硬指到 fp16 目錄卻在 CPU 上跑，`preflight()` 會**直接拒絕啟動**並說明原因，不會安靜降精度。
+
+兩份都留著的話磁碟是**增加** 665 MB。真正省到的地方是可攜版：
+
+```bash
+python3 scripts/make_bundle.py --out gsv-gpu --cuda cu121 --bert-fp16-only
+```
+
+那份 bundle 只帶 fp16，權重從 2.85 GB 降到約 2.27 GB —— 但它只能在 GPU 上跑，在 CPU 機器上會被 `preflight()` 擋下來。
+
 只抓 PyTorch 格式的權重 —— 前一版的 8.25 GB 裡有 4.69 GB（57%）是 TensorFlow / Flax / fairseq 的重複權重（見 §7）。
 
 ### 系統需求
@@ -955,6 +993,19 @@ else:
 
 **為什麼不「修」它**：這個模型就是**用這個管線訓練出來的** —— 訓練時英文片段的 BERT 也是全零。推論時改成餵真實特徵會造成 train/inference 不一致，結果大概率更差而不是更好。這不是能靠改幾行就賺到的東西，所以不動。
 
+**可以做的：把輸出音訊裡多餘的停頓剪掉。** 句子裡有中英邊界、而且**中間沒有任何停頓標點**時，那個停頓就是多餘的。實測同一句「我把檔案存成 wav 然後上傳到 server 再用 python 處理」：
+
+| | 中間停頓 | 總長 |
+|---|---|---|
+| upstream 原樣 | 460 ms、230 ms | 4.58 s |
+| `max_language_gap_ms: 120` | 120 ms、120 ms | 4.25 s |
+
+`gaptrim.py` 的關鍵是**只扣住靜音、不扣住語音**：第一個語音出現之前所有東西原樣直通，所以**第一個 byte 的時間完全不變，TTFA 不受影響**；之後遇到低能量的窗先存著，等語音回來時最多只送 `max_gap_ms` 那麼多。扣住的是客戶端本來就只會播成無聲的樣本，所以不需要任何前瞻緩衝，串流一樣適用。
+
+只在「有中英邊界**且**句中無停頓標點」時啟用 —— 有標點時那些停頓是該有的，而且沒辦法把音訊上的 gap 可靠地對應回文字位置，所以寧可不動。前導與尾端的靜音也不碰。
+
+這是對輸出音訊的後處理（合成本身完全不變），但它確實改變輸出，所以列在 `/health` 的 `quality.deviations` 裡，`quality.clean` 會變 `false`。設 `max_language_gap_ms: 0` 可關閉。
+
 **實際有效的做法**，依效果排序：
 
 1. **換成雙語或英文的參考音訊**（效果最大）。洛神的參考音訊是純中文，模型從沒聽過這個說話者講英文。用 `scripts/add_voice.py` 裝一組雙語參考。
@@ -1182,6 +1233,7 @@ server/
     settings.py           設定載入與驗證
     bert_trim.py          BERT 等價剪裁
     pronunciation.py      自訂中英發音：載入、驗證、套用、查詢、音素丟失記錄
+    gaptrim.py            中英切換處多餘停頓的上限器（串流安全，不影響 TTFA）
     engine.py             暖機、快取、量測、GPU 操作序列化
     api.py                HTTP + WebSocket
     console.html          網頁控制台（單一檔、零外部依賴）
@@ -1198,6 +1250,7 @@ scripts/
   import_graph.py         可達性分析 / 斷鏈驗證 / --manifest 重新產生清單
   fetch_models.sh         下載權重（只抓 PyTorch 格式）與英文 nltk 語料
   make_colab.py           產生 Colab.ipynb（寫出前會先編譯每個 code cell）
+  make_fp16.py            產生 fp16 的 BERT 並逐位元驗證（GPU 用，省 582 MB）
   verify_equivalence.py   實測等價優化是否真的等價（需 GPU）
   bench.py                量 TTFA（只用標準庫）
   check_en.py             查某個英文詞實際會被唸成什麼音素

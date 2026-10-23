@@ -24,6 +24,7 @@ from . import bootstrap
 bootstrap.setup()
 
 from . import bert_trim  # noqa: E402
+from . import gaptrim  # noqa: E402
 from . import pronunciation  # noqa: E402
 from .settings import Settings  # noqa: E402
 
@@ -38,6 +39,54 @@ def _resolve_device(spec: str) -> str:
     import torch
 
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _checkpoint_is_fp16(path: str) -> bool:
+    """看 config.json 的 torch_dtype 標記。不載入 1.3 GB 的權重。
+
+    `scripts/make_fp16.py` 產生 fp16 目錄時會寫進這個標記。upstream 的
+    `init_bert_weights()` 沒有傳 `torch_dtype`，所以這個欄位對載入本身是惰性的
+    （transformers 只有在 `torch_dtype="auto"` 時才讀它），純粹當辨識用。
+    """
+    import json
+    import os
+
+    cfg = os.path.join(path, "config.json")
+    if not os.path.isfile(cfg):
+        return False
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            return str(json.load(f).get("torch_dtype", "")).endswith("float16")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def resolve_bert_path(settings: Settings, device: str) -> tuple[str, bool]:
+    """依裝置挑 BERT 權重，回傳 (相對路徑, 是否用了 fp16)。
+
+    GPU 且 is_half=True 時，`TTS.py:490-491` 本來就會把整個 BERT 轉成 fp16：
+
+        if self.configs.is_half and str(self.configs.device) != "cpu":
+            self.bert_model = self.bert_model.half()
+
+    fp32 -> fp16 是確定性轉換，所以「先轉好存檔」和「載入 fp32 再轉」得到
+    **逐位元相同**的權重（scripts/make_fp16.py --verify 會實際比對 399 個張量）。
+    那條路徑上用 fp16 檔案純粹省磁碟，不影響任何輸出。
+
+    CPU 上 is_half=False，那個 `.half()` 不會執行，BERT 用 fp32 跑 —— 這時給
+    fp16 檔案會讓 transformers 上轉回 fp32，數值變成「fp16 精度裝在 fp32 容器
+    裡」，那是真的精度損失。所以這裡只在 GPU + is_half 時才挑 fp16。
+    """
+    import os
+
+    use_half = settings.is_half and device != "cpu"
+    if not use_half:
+        return settings.models.bert, False
+
+    candidate = settings.models.bert_fp16 or (settings.models.bert + "-fp16")
+    if os.path.isdir(settings.resolve(candidate)):
+        return candidate, True
+    return settings.models.bert, False
 
 
 class PreflightError(ValueError):
@@ -147,6 +196,21 @@ def preflight(settings: Settings) -> dict[str, Any]:
         problems.append(str(exc))
         detected["custom_pronunciations"] = []
 
+    # CPU 上用 fp16 的 BERT 是實實在在的精度損失（TTS.py:491 的 .half() 不會
+    # 執行，transformers 會把 fp16 上轉回 fp32）。安靜降精度正是本專案要避免的。
+    device = _resolve_device(settings.device)
+    if _checkpoint_is_fp16(settings.resolve(settings.models.bert)):
+        if not (settings.is_half and device != "cpu"):
+            problems.append(
+                f"models.bert 指向 fp16 權重（{settings.models.bert}），但目前是 "
+                f"device={device} / is_half={settings.is_half}。這個組合不會執行 "
+                f"TTS.py:491 的 .half()，fp16 會被上轉回 fp32 —— 那是真的精度損失。"
+                f"請改指回 fp32 的目錄，或改用 GPU 並開啟 is_half。"
+            )
+    bert_path, bert_is_fp16 = resolve_bert_path(settings, device)
+    detected["bert_path"] = bert_path
+    detected["bert_fp16"] = bert_is_fp16
+
     detected["english_ready"] = english_frontend_ready()
     if not detected["english_ready"]:
         from . import bootstrap as _bs
@@ -176,6 +240,7 @@ def _build_tts_config(settings: Settings) -> TTS_Config:
     整組被忽略，退回 v2 的預設值 —— 會安靜地載入錯誤的模型。
     """
     device = _resolve_device(settings.device)
+    bert_path, _ = resolve_bert_path(settings, device)
     return TTS_Config(
         {
             "custom": {
@@ -184,7 +249,7 @@ def _build_tts_config(settings: Settings) -> TTS_Config:
                 "version": settings.version,
                 "t2s_weights_path": settings.resolve(settings.models.t2s),
                 "vits_weights_path": settings.resolve(settings.models.vits),
-                "bert_base_path": settings.resolve(settings.models.bert),
+                "bert_base_path": settings.resolve(bert_path),
                 "cnhuhbert_base_path": settings.resolve(settings.models.cnhubert),
             }
         }
@@ -391,6 +456,12 @@ class Engine:
                 "latency.profile=low：啟用 streaming_mode，upstream 在 "
                 "TTS.py:1027 自評為 Medium quality，且會強制 parallel_infer=False "
                 "使 AR 改走 infer_panel_naive（另一條程式碼路徑）"
+            )
+        if lat.max_language_gap_ms > 0:
+            notes.append(
+                f"latency.max_language_gap_ms={lat.max_language_gap_ms}："
+                "中英切換且句中無標點時，會把輸出音訊裡過長的停頓縮到這個上限。"
+                "這是對輸出音訊的後處理，合成本身不變"
             )
         if lat.fixed_length_chunk:
             notes.append("latency.fixed_length_chunk=true：upstream 在 TTS.py:1033 自評為 lower quality")
@@ -612,13 +683,21 @@ class Engine:
 
         inputs = self._build_inputs(text, text_lang=text_lang, profile=profile, **overrides)
 
+        # 中英切換處的多餘停頓。只在「有中英邊界且句中無標點」時處理 ——
+        # 有標點的話那些停頓是該有的，而且沒辦法把音訊上的 gap 可靠地對應
+        # 回文字位置。
+        gap_ms = self.settings.latency.max_language_gap_ms
+        source = self._run(inputs)
+        if gap_ms > 0 and gaptrim.has_language_switch_without_punct(text):
+            source = gaptrim.limit_stream(source, gap_ms)
+
         with self._lock:
             start = time.perf_counter()
             first_at: float | None = None
             samples = 0
             sample_rate = 0
             try:
-                for sr, chunk in self._run(inputs):
+                for sr, chunk in source:
                     if first_at is None:
                         first_at = time.perf_counter() - start
                         self._ttfa.append(first_at)
@@ -710,6 +789,7 @@ class Engine:
             "version": self.config.version,
             "device": str(self.config.device),
             "is_half": self.config.is_half,
+            "bert_fp16": bool(self.detected.get("bert_fp16")),
             "use_vocoder": self.config.use_vocoder,
             "sampling_rate": self.tts.configs.sampling_rate
             if not self.config.use_vocoder

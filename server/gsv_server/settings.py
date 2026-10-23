@@ -26,6 +26,10 @@ class ModelPaths:
     vits: str = "GPT_SoVITS/pretrained_models/洛神_e8_v2Pro.pth"
     bert: str = "GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large"
     cnhubert: str = "GPT_SoVITS/pretrained_models/chinese-hubert-base"
+    # fp16 版的 BERT。留空會自動找 <bert>-fp16。
+    # 只有在 GPU 且 is_half=True 時才會用 —— 那時 TTS.py:491 本來就會轉 fp16，
+    # 所以逐位元相同。CPU 上用它是實實在在的精度損失，preflight() 會擋。
+    bert_fp16: str = ""
 
 
 @dataclass
@@ -96,6 +100,11 @@ class Latency:
     fixed_length_chunk: bool = False  # upstream 標 "lower quality"
 
     # 等價優化（README §4 類別一），預設開啟
+    # 中英切換處的多餘停頓上限（毫秒）。0 = 不處理。
+    # 只在「有中英邊界且句中無停頓標點」時啟用 —— 有標點時那些停頓是該有的。
+    # 這會改變輸出音訊，所以算 §4 的刻意偏離，會列在 /health 的 quality 裡。
+    max_language_gap_ms: int = 0
+
     trim_bert: bool = True
     warmup_dummy_run: bool = True
     warmup_english_frontend: bool = True

@@ -146,6 +146,9 @@ def main() -> int:
                     help="PyTorch channel：cpu（預設）/ cu118 / cu121 / cu124")
     ap.add_argument("--python", default=PY_VERSION)
     ap.add_argument("--archive", action="store_true", help="另外產生 .tar.gz")
+    ap.add_argument("--bert-fp16-only", action="store_true",
+                    help="只帶 fp16 的 BERT，省 582 MB。這份 bundle 只能在 GPU 上跑 —— "
+                         "CPU 上 preflight() 會拒絕啟動（fp16 在 CPU 上是真的精度損失）")
     ap.add_argument("--no-weights", action="store_true", help="不含權重（之後用 start.py --download-only 補）")
     ap.add_argument("--copy", action="store_true", help="權重一律實體複製，不用硬連結")
     args = ap.parse_args()
@@ -271,6 +274,22 @@ def main() -> int:
               f"先執行 scripts/fetch_models.sh")
     for f in ("requirements.txt", "README.md"):
         shutil.copy2(REPO / f, app / f)
+    if args.bert_fp16_only:
+        # GPU 專用的瘦身：只帶 fp16 的 BERT，省 582 MB。
+        # fp16 只有在 is_half=True 且非 CPU 時才用得上（TTS.py:490-491），
+        # 所以這種 bundle 在 CPU 機器上會被 preflight() 擋下來並說明原因，
+        # 而不是安靜地降精度。
+        fp32 = app / "server/GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large"
+        fp16 = Path(str(fp32) + "-fp16")
+        if not fp16.is_dir():
+            print(f"  {WARN} 找不到 {fp16.name}，先執行 scripts/make_fp16.py")
+        elif fp32.is_dir():
+            def _bytes(d: Path) -> int:
+                return sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+            saved = _bytes(fp32) - _bytes(fp16)
+            shutil.rmtree(fp32)
+            print(f"  {OK} 只帶 fp16 的 BERT（省 {saved / 1e6:.0f} MB）—— 這份 bundle 需要 GPU")
+
     if args.no_weights:
         shutil.rmtree(app / "server/GPT_SoVITS/pretrained_models", ignore_errors=True)
         shutil.rmtree(app / "server/GPT_SoVITS/text/G2PWModel", ignore_errors=True)
