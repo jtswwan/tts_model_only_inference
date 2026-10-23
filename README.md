@@ -60,24 +60,62 @@ GPT-SoVITS 的**純推論** server。單一目標：**超低延遲**。
 
 ## 使用方式
 
+### 一鍵啟動
+
 ```bash
-# 1. 取出 upstream 的推論子集（已 commit，通常不需要重跑）
-scripts/vendor_upstream.sh <upstream-checkout> server
+./start.sh          # Linux / macOS（多數檔案管理器可直接雙擊）
+start.bat           # Windows（雙擊）
+python3 scripts/start.py    # 或直接執行
+```
 
-# 2. 驗證剪枝沒有造成斷鏈
-python scripts/import_graph.py server --verify
+它會依序：檢查 Python 版本 → 建立虛擬環境 → 偵測 GPU 並裝對應的 torch → 下載權重 → 啟動 server → 開啟控制台。
 
-# 3. 安裝依賴
+**會立刻彈出一個進度頁面**，而不是讓你對著終端機等。第一次要下載約 2.7 GB，裝依賴也要幾分鐘，所以進度必須看得見。裝完會自動交棒給真正的 server 並切換到控制台。
+
+```
+  0.1s  進度頁
+  3.3s  環境就緒，正在交棒給 server…
+  4.8s  server 啟動中，正在載入模型並暖機…
+ 72.7s  控制台（就緒）
+```
+
+交棒期間 port 上沒有東西在聽（uvicorn 會先跑完 lifespan 才綁 port），進度頁會耐心等待而不是顯示連線錯誤。
+
+常用參數：
+
+```bash
+python3 scripts/start.py --port 9000        # 換 port
+python3 scripts/start.py --device cpu       # 強制裝 CPU 版 torch
+python3 scripts/start.py --no-browser       # 不自動開瀏覽器
+python3 scripts/start.py --setup-only       # 只建環境
+python3 scripts/start.py --download-only    # 只下載權重
+```
+
+### 需要多少空間
+
+| 項目 | 大小 | 說明 |
+|---|---|---|
+| `git clone` | **約 26 MB** | 其中 17.3 MB 是中英文前端詞典（`cmudict` 7 MB、`engdict_cache` 5.7 MB、`polyphonic` 2.9 MB）。程式碼本身不到 1 MB |
+| 模型權重 | **約 2.85 GB** | BERT 1.3 G、G2PW 608 M、CNHubert 361 M、洛神 GPT 149 M + SoVITS 129 M、fast_langdetect 126 M、SV 103 M |
+| 虛擬環境（CPU） | **約 1.8 GB** | 實測值 |
+| 虛擬環境（CUDA） | 較大 | torch 的 CUDA wheel 另外會拉 `nvidia-*` 相依套件；裝完後控制台會顯示實際佔用 |
+
+CPU 版總計約 **4.7 GB**。
+
+只抓 PyTorch 格式的權重 —— 前一版的 8.25 GB 裡有 4.69 GB（57%）是 TensorFlow / Flax / fairseq 的重複權重（見 §7）。
+
+### 系統需求
+
+- **Python 3.10 ~ 3.12**。不能用 3.13：upstream 釘 `numpy<2.0`，而它在 3.13 沒有 wheel。另外 `jieba_fast` 只有 2019 年的 source tarball，必須就地編譯 C 擴充（3.11 / 3.12 實測可通過）
+- `ffmpeg`（`torchaudio` 讀音檔用）
+- GPU 非必要。CPU 跑得動但約 0.6–0.8× 即時（見 §11.1）
+
+### 手動安裝
+
+```bash
 pip install -r requirements.txt
-
-# 4. 下載權重（只抓 PyTorch 格式）
-scripts/fetch_models.sh
-
-# 5. 驗證等價優化真的等價（需要 GPU）
-python scripts/verify_equivalence.py
-
-# 6. 啟動
-python -m gsv_server            # 在 server/ 目錄下
+scripts/fetch_models.sh          # 等同 start.py --download-only
+cd server && python -m gsv_server
 ```
 
 啟動只有這一條路徑。**不要用 `uvicorn gsv_server.api:app`** —— `app` 需要帶著設定建構，而 `bootstrap` 必須在 import upstream 之前完成。前一版正是因為「用什麼指令啟動」會改變實際執行的程式碼而出問題（§1.1）。
@@ -97,18 +135,16 @@ curl -N 'http://localhost:8000/tts/stream?text=你好' -o out.pcm
 # 狀態與延遲量測
 curl http://localhost:8000/health
 curl http://localhost:8000/metrics
-
-# 切換模型 / 參考音訊（都會重新暖機）
-curl -X POST http://localhost:8000/model     -d '{"version":"v4","vits":"...s2Gv4 的洛神 LoRA.pth"}'
-curl -X POST http://localhost:8000/reference -d '{"audio":"...wav","text":"參考文本"}'
 ```
 
 WebSocket `/tts/ws`：送 `{"text": "..."}`，收到 `{"event":"begin",...}`、多個二進位 PCM 區塊、最後 `{"event":"end","ttfa_ms":...}`。
 
+控制台見 §6.0，換模型 / 參考音訊見 §6.1 與 §6.2。
+
 ### 量延遲
 
 ```bash
-python scripts/bench.py --url http://localhost:8000 --profiles quality,low
+python scripts/bench.py --url http://localhost:8000 --profiles quality
 ```
 
 量的是**客戶端收到第一個 byte 的時間**，不是伺服器自己回報的數字。同時回報「即時倍率」—— 大於 1 表示生成快於播放，串流可以不中斷。
@@ -931,6 +967,7 @@ preflight 把這兩種情況都變成 **HTTP 400**，並附上可行動的訊息
 ## 10. Repo 結構
 
 ```
+start.sh / start.bat      一鍵啟動（雙擊即可）
 requirements.txt          由 import 圖掃出，非從 upstream 抄改
 
 server/
@@ -948,6 +985,7 @@ server/
     __main__.py           唯一的啟動進入點
 
 scripts/
+  start.py                一鍵啟動：建環境 → 下載權重 → 啟動 server → 開控制台
   add_voice.py            裝一組新的模型 + 參考音訊（檢查、放檔、產生設定）
   prepare.py              離線剪裁 BERT 等啟動時間優化（選用）
   manifest.txt            vendored 檔案的唯一真實清單（每組都寫明理由）

@@ -26,3 +26,6 @@ output/
 # 測試產生的暫存
 hdr*.txt
 samples/
+
+# 本機虛擬環境
+.venv/
