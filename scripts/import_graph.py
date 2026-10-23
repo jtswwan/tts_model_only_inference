@@ -103,6 +103,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("root", help="含 GPT_SoVITS/ 與 tools/ 的目錄")
     ap.add_argument("--verify", action="store_true", help="只檢查斷鏈，成功則靜默")
+    ap.add_argument("--manifest", action="store_true",
+                    help="只印出可達的 .py 路徑，供 scripts/manifest.txt 的 [reachable] 組使用")
     args = ap.parse_args()
 
     roots = [args.root, os.path.join(args.root, "GPT_SoVITS")]
@@ -143,6 +145,11 @@ def main():
             if name not in ("__pycache__",):
                 internal_tops.add(name)
     suspicious = {k: v for k, v in external.items() if k in internal_tops}
+
+    if args.manifest:
+        for k in kept:
+            print(k)
+        return 0
 
     if args.verify:
         if suspicious:

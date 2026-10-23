@@ -1,0 +1,176 @@
+# vendored upstream 檔案清單 —— scripts/vendor_upstream.sh 只複製這裡列出的路徑。
+#
+# 用加法而非「整份複製再刪除」：刪除法留下的是未知的多餘檔案，加法留下的是
+# 明確清單。清單裡每一個項目都要有理由。
+#
+# [reachable] 這一組可用下列指令重新產生（upstream 更新後用得上）：
+#     python scripts/import_graph.py server --manifest
+# 其餘各組無法由靜態分析得出，理由逐條寫在該組的註解裡。
+#
+# 空行與 # 開頭的行會被忽略。vendor_upstream.sh 遇到清單中不存在的檔案會中止，
+# 不會安靜跳過。
+
+# === [reachable] 從推論進入點靜態可達的 .py ===
+# 由 scripts/import_graph.py 的可達性分析產生。
+GPT_SoVITS/AR/models/t2s_lightning_module.py
+GPT_SoVITS/AR/models/t2s_model.py
+GPT_SoVITS/AR/models/utils.py
+GPT_SoVITS/AR/modules/activation.py
+GPT_SoVITS/AR/modules/embedding.py
+GPT_SoVITS/AR/modules/lr_schedulers.py
+GPT_SoVITS/AR/modules/optim.py
+GPT_SoVITS/AR/modules/patched_mha_with_cache.py
+GPT_SoVITS/AR/modules/scaling.py
+GPT_SoVITS/AR/modules/transformer.py
+GPT_SoVITS/BigVGAN/activations.py
+GPT_SoVITS/BigVGAN/alias_free_activation/torch/act.py
+GPT_SoVITS/BigVGAN/alias_free_activation/torch/filter.py
+GPT_SoVITS/BigVGAN/alias_free_activation/torch/resample.py
+GPT_SoVITS/BigVGAN/bigvgan.py
+GPT_SoVITS/BigVGAN/env.py
+GPT_SoVITS/BigVGAN/meldataset.py
+GPT_SoVITS/BigVGAN/utils0.py
+GPT_SoVITS/TTS_infer_pack/TTS.py
+GPT_SoVITS/TTS_infer_pack/TextPreprocessor.py
+GPT_SoVITS/TTS_infer_pack/text_segmentation_method.py
+GPT_SoVITS/f5_tts/model/__init__.py
+GPT_SoVITS/f5_tts/model/backbones/dit.py
+GPT_SoVITS/f5_tts/model/modules.py
+GPT_SoVITS/feature_extractor/cnhubert.py
+GPT_SoVITS/module/__init__.py
+GPT_SoVITS/module/attentions.py
+GPT_SoVITS/module/commons.py
+GPT_SoVITS/module/core_vq.py
+GPT_SoVITS/module/ddp_utils.py
+GPT_SoVITS/module/distrib.py
+GPT_SoVITS/module/mel_processing.py
+GPT_SoVITS/module/models.py
+GPT_SoVITS/module/modules.py
+GPT_SoVITS/module/mrte_model.py
+GPT_SoVITS/module/quantize.py
+GPT_SoVITS/module/transforms.py
+GPT_SoVITS/process_ckpt.py
+GPT_SoVITS/sv.py
+GPT_SoVITS/text/LangSegmenter/__init__.py
+GPT_SoVITS/text/LangSegmenter/langsegmenter.py
+GPT_SoVITS/text/__init__.py
+GPT_SoVITS/text/chinese.py
+GPT_SoVITS/text/chinese2.py
+GPT_SoVITS/text/cleaner.py
+GPT_SoVITS/text/en_normalization/expend.py
+GPT_SoVITS/text/english.py
+GPT_SoVITS/text/g2pw/__init__.py
+GPT_SoVITS/text/g2pw/dataset.py
+GPT_SoVITS/text/g2pw/g2pw.py
+GPT_SoVITS/text/g2pw/onnx_api.py
+GPT_SoVITS/text/g2pw/utils.py
+GPT_SoVITS/text/symbols.py
+GPT_SoVITS/text/symbols2.py
+GPT_SoVITS/text/tone_sandhi.py
+GPT_SoVITS/text/zh_normalization/char_convert.py
+GPT_SoVITS/text/zh_normalization/chronology.py
+GPT_SoVITS/text/zh_normalization/constants.py
+GPT_SoVITS/text/zh_normalization/num.py
+GPT_SoVITS/text/zh_normalization/phonecode.py
+GPT_SoVITS/text/zh_normalization/quantifier.py
+GPT_SoVITS/text/zh_normalization/text_normlization.py
+GPT_SoVITS/utils.py
+tools/audio_sr.py
+tools/i18n/i18n.py
+
+# === [pkg] 套件標記 ===
+# 靜態分析不會把 __init__.py 列為可達，但沒有它們 import 會失敗
+# （tools 與 AP_BWE_main 底下的子套件是以絕對名稱 import 的）。
+#
+# BigVGAN/alias_free_activation/torch/__init__.py 不是空的 —— 它有
+# from .filter / .resample / .act import *。bigvgan.py:19 雖然是直接 import
+# 子模組 act（PEP 420 namespace package 也能解析），但這是實際使用的套件的
+# 標記檔，不帶的風險沒必要承擔。
+# 注意 alias_free_activation/ 本身在 upstream 就沒有 __init__.py（namespace
+# package），BigVGAN/ 也沒有，所以這兩層沒有東西可帶。
+GPT_SoVITS/AR/__init__.py
+GPT_SoVITS/AR/models/__init__.py
+GPT_SoVITS/AR/modules/__init__.py
+GPT_SoVITS/TTS_infer_pack/__init__.py
+GPT_SoVITS/feature_extractor/__init__.py
+GPT_SoVITS/text/zh_normalization/__init__.py
+GPT_SoVITS/BigVGAN/alias_free_activation/torch/__init__.py
+tools/__init__.py
+tools/AP_BWE_main/datasets1/__init__.py
+tools/AP_BWE_main/models/__init__.py
+
+# === [dynamic] 執行期以 sys.path 動態載入，靜態分析追不到 ===
+# sv.py:5  sys.path.append(f"{os.getcwd()}/GPT_SoVITS/eres2net") 之後
+#          from ERes2NetV2 import ERes2NetV2 / import kaldi
+#          ERes2NetV2.py 自身再 import pooling_layers 與 fusion。
+#          這是 v2Pro 的 SV 聲紋模型，缺了 v2Pro 無法運作。
+#          不含 ERes2Net.py 與 ERes2Net_huge.py —— sv.py 只用 V2 這個變體。
+# tools/audio_sr.py:6  sys.path.append(.../AP_BWE_main) 之後
+#          from datasets1.dataset import / models。TTS.py:33 無條件 import
+#          audio_sr，所以即使不用 v3 的超解析也必須存在。
+GPT_SoVITS/eres2net/ERes2NetV2.py
+GPT_SoVITS/eres2net/kaldi.py
+GPT_SoVITS/eres2net/fusion.py
+GPT_SoVITS/eres2net/pooling_layers.py
+tools/AP_BWE_main/datasets1/dataset.py
+tools/AP_BWE_main/models/model.py
+
+# === [data-en] 英文前端的詞典 ===
+# text/english.py:19-23 以常數路徑開啟這五個檔案。
+GPT_SoVITS/text/cmudict.rep
+GPT_SoVITS/text/cmudict-fast.rep
+GPT_SoVITS/text/engdict-hot.rep
+GPT_SoVITS/text/engdict_cache.pickle
+GPT_SoVITS/text/namedict_cache.pickle
+
+# === [data-zh] 中文前端的詞典 ===
+# opencpop-strict.txt 由 text/chinese.py 與 chinese2.py 開啟。
+# polyphonic* 由 text/g2pw/g2pw.py 開啟（多音字修正表）。
+# 注意 G2PWModel/ 不在此清單中 —— 那是 635MB 的權重，由
+# scripts/fetch_models.sh 下載，並由 upstream 的 text/.gitignore 排除。
+GPT_SoVITS/text/opencpop-strict.txt
+GPT_SoVITS/text/g2pw/polyphonic.rep
+GPT_SoVITS/text/g2pw/polyphonic-fix.rep
+GPT_SoVITS/text/g2pw/polyphonic.pickle
+
+# === [i18n] 語言檔 ===
+# tools/i18n/i18n.py 的 I18nAuto 偵測不到對應語言時固定回退 en_US，
+# 然後「無條件開檔」—— 所以 en_US.json 是必要的，缺了會在 import 期
+# FileNotFoundError。zh_CN / zh_TW 是預期的實際系統語言，帶上讓 log 可讀。
+# 其餘 10 個語言檔有 fallback 保護，不帶。
+# scan_language_list() 會 os.listdir 這個目錄，所以目錄必須存在。
+tools/i18n/locale/en_US.json
+tools/i18n/locale/zh_CN.json
+tools/i18n/locale/zh_TW.json
+
+# === [configs] 模型架構設定 ===
+# 推論路徑不讀這些（hps 來自 checkpoint 自身的 config），但 README §2.2
+# 引用 s2v2Pro.json 作為架構參數的對照依據，留著讓該引用可被查核。
+# 不含 s1*.yaml 與 train.yaml（訓練設定）。
+GPT_SoVITS/configs/s2.json
+GPT_SoVITS/configs/s2v2Pro.json
+GPT_SoVITS/configs/s2v2ProPlus.json
+
+# === [gitignore] upstream 自己的權重排除規則 ===
+# text/.gitignore 排除 G2PWModel，pretrained_models/.gitignore 排除全部內容。
+# 保留它們，權重就不會被誤 commit。
+# configs/.gitignore 內容是 *.yaml —— TTS_Config.__init__ 會對 configs/ 做
+# makedirs，且在未傳設定時會寫出 tts_infer.yaml。本專案一律傳 dict 所以不會
+# 觸發，但留著這個檔案可保證即使哪天觸發了也不會被誤 commit。
+GPT_SoVITS/text/.gitignore
+GPT_SoVITS/pretrained_models/.gitignore
+GPT_SoVITS/configs/.gitignore
+
+# === [license] 授權文件 ===
+# 本專案重新散布 upstream 的程式碼，授權文件必須一併帶上。
+LICENSE
+GPT_SoVITS/BigVGAN/LICENSE
+GPT_SoVITS/BigVGAN/incl_licenses/LICENSE_1
+GPT_SoVITS/BigVGAN/incl_licenses/LICENSE_2
+GPT_SoVITS/BigVGAN/incl_licenses/LICENSE_3
+GPT_SoVITS/BigVGAN/incl_licenses/LICENSE_4
+GPT_SoVITS/BigVGAN/incl_licenses/LICENSE_5
+GPT_SoVITS/BigVGAN/incl_licenses/LICENSE_6
+GPT_SoVITS/BigVGAN/incl_licenses/LICENSE_7
+GPT_SoVITS/BigVGAN/incl_licenses/LICENSE_8
+tools/AP_BWE_main/LICENSE

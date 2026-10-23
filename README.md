@@ -21,7 +21,7 @@ GPT-SoVITS 的**純推論** server。單一目標：**超低延遲**。
 - [4. 設計原則：「不動音質」的操作型定義](#4-設計原則不動音質的操作型定義)
 - [5. 低延遲設計](#5-低延遲設計)
 - [6. 對外介面](#6-對外介面)
-- [7. 保留 / 刪除清單](#7-保留--刪除清單)
+- [7. vendoring：用加法，不用刪除法](#7-vendoring用加法不用刪除法)
 - [8. 依賴瘦身](#8-依賴瘦身)
 - [9. 取樣參數](#9-取樣參數)
 - [10. Repo 結構](#10-repo-結構)
@@ -601,25 +601,40 @@ TTFA 與第一個 chunk 的 token 數成正比 → 切得細則延遲低。
 
 ---
 
-## 7. 保留 / 刪除清單
+## 7. vendoring：用加法，不用刪除法
 
-### 保留（原封不動，不改寫）
+### 方法
 
-```
-TTS_infer_pack/      TTS.py, TextPreprocessor.py, text_segmentation_method.py
-AR/                  models/, modules/, utils/            （不含 data/）
-module/              models.py, modules.py, attentions.py, commons.py,
-                     mel_processing.py, mrte_model.py, quantize.py,
-                     core_vq.py, transforms.py
-feature_extractor/   cnhubert.py                （暖機時用，不在請求路徑上）
-text/                中文 + 英文前端（含 G2PW、LangSegmenter）
-process_ckpt.py, utils.py, configs/
-tools/i18n/, tools/my_utils.py
-v2Pro：              sv.py + eres2net/          （暖機時用）
-v4：                 f5_tts/model/
-```
+**唯一的真實清單是 [`scripts/manifest.txt`](scripts/manifest.txt)。** `scripts/vendor_upstream.sh` 只複製那份清單列出的路徑，清單裡沒有的就不存在。
 
-### 刪除
+初版用的是「整份複製再刪除」，已改掉。理由：**刪除法留下的是未知的多餘檔案，加法留下的是明確清單。** 加法還有一個更實際的好處 —— 清單中有任何路徑在來源不存在時腳本直接中止，而刪除法對「不小心留下的東西」沒有任何訊號。
+
+清單分組，每組都寫明為何需要：
+
+| 組 | 內容 | 依據 |
+|---|---|---|
+| `[reachable]` | 65 個 .py | `scripts/import_graph.py` 的可達性分析，可用 `--manifest` 重新產生 |
+| `[pkg]` | 套件標記 `__init__.py` | 靜態分析不會把它們列為可達，缺了 import 會失敗 |
+| `[dynamic]` | `eres2net/`、`AP_BWE_main/` | 執行期以 `sys.path.append` 載入，靜態分析追不到 |
+| `[data-en]` / `[data-zh]` | 詞典檔 | 以 `open()` 讀取，import 分析看不到 —— 另外掃字串常數找出來的 |
+| `[i18n]` | `en_US` + `zh_CN` + `zh_TW` | `I18nAuto` 固定回退 `en_US` 後**無條件開檔**，缺了會 FileNotFoundError |
+| `[configs]` | `s2*.json` | 推論不讀，但 §2.2 引用 `s2v2Pro.json` 作為架構依據，留著讓引用可查核 |
+| `[gitignore]` | upstream 自己的排除規則 | 保留它們，權重不會被誤 commit |
+| `[license]` | `LICENSE` ×11 | 本專案重新散布 upstream 的程式碼 |
+
+結果：**110 個檔案、81 個 .py**。體積仍是 18 MB，因為幾乎全部是中英文前端的詞典檔（`cmudict*.rep` 7 MB、`engdict_cache.pickle` 5.7 MB、`polyphonic*` 2.9 MB），那些是必要的。vendored 的程式碼本身只有 128 KB 加上 `GPT_SoVITS/` 下的 .py。
+
+### 交叉檢查：加法樹 vs 刪除法樹
+
+換方法時沒有直接取代，而是兩種方法各建一棵樹逐檔對照，**任何差異都必須解釋**。這抓到一項加法漏掉的東西：
+
+> `BigVGAN/alias_free_activation/torch/__init__.py` 不是空的 —— 它有 `from .filter / .resample / .act import *`。`bigvgan.py:19` 雖然是直接 import 子模組（PEP 420 namespace package 也能解析），但這是實際使用的套件的標記檔，不帶沒有道理。
+
+值得記下的是 **`--verify` 抓不到這一項** —— `import_graph.py` 的 resolver 把純目錄當 namespace package 接受了。是兩棵樹的對照抓到的。靜態驗證有盲區，交叉檢查才補得上。
+
+對照剩下的 24 項差異全部確認為「刪除法多留的」：4 個 README、`configs/` 下 7 個訓練 yaml 與 `tts_infer.yaml`、以及 10 個有 `en_US` fallback 保護的語言檔。
+
+### 不在清單中的（以及為什麼）
 
 | 類別 | 項目 |
 |---|---|
@@ -711,8 +726,9 @@ server/
     __main__.py           唯一的啟動進入點
 
 scripts/
-  vendor_upstream.sh      從 upstream 取出推論子集
-  import_graph.py         可達性分析 / 剪枝後的斷鏈驗證
+  manifest.txt            vendored 檔案的唯一真實清單（每組都寫明理由）
+  vendor_upstream.sh      依 manifest 複製；清單中的路徑不存在就中止
+  import_graph.py         可達性分析 / 斷鏈驗證 / --manifest 重新產生清單
   fetch_models.sh         下載權重（只抓 PyTorch 格式）
   verify_equivalence.py   實測等價優化是否真的等價（需 GPU）
   bench.py                量 TTFA（只用標準庫）
