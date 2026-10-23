@@ -67,6 +67,58 @@ def needed_layer_index(num_layers: int) -> int:
     return num_layers - 2
 
 
+PROBE_TEXTS = (
+    "慢慢來也沒關係，只要沒有停下來，你其實一直都在前進。",
+    "今天天氣不錯。",
+    "A",
+    "一二三四五六七八九十，1234567890，百分之五十。",
+    "這個專案用 v2Pro 模型，sample rate 是 32000 Hz。",
+)
+
+
+def probe(model: nn.Module, tokenizer, device, texts=PROBE_TEXTS) -> list[torch.Tensor]:
+    """完全照 TextPreprocessor.py:196-197 的方式取值，回傳每段文字的結果。
+
+    用於截層前後的等價性自檢：取法必須和真正會被使用的那條路徑一模一樣，
+    否則驗了也不算驗。
+    """
+    out = []
+    with torch.no_grad():
+        for text in texts:
+            inputs = {k: v.to(device) for k, v in tokenizer(text, return_tensors="pt").items()}
+            res = model(**inputs, output_hidden_states=True)
+            out.append(torch.cat(res["hidden_states"][-3:-2], -1).clone())
+    return out
+
+
+class TrimEquivalenceError(RuntimeError):
+    """截層後的輸出與原模型不一致。"""
+
+
+def assert_equivalent(before: list[torch.Tensor], after: list[torch.Tensor]) -> None:
+    """要求逐位元相同。不是近似，不給容差。
+
+    這兩次前向是同樣的輸入、同樣的權重、同樣的運算順序，結果本來就該完全
+    相同。有任何差異就代表剪裁邏輯不成立（最可能的原因是 hidden_states 的
+    負索引補齊沒對上），而不是浮點誤差。
+    """
+    if len(before) != len(after):
+        raise TrimEquivalenceError(f"探針數量不符: {len(before)} vs {len(after)}")
+    for i, (ref, got) in enumerate(zip(before, after)):
+        if ref.shape != got.shape:
+            raise TrimEquivalenceError(
+                f"探針 {i} 形狀不符: {tuple(ref.shape)} vs {tuple(got.shape)}"
+            )
+        if not torch.equal(ref, got):
+            diff = (ref.float() - got.float()).abs().max().item()
+            raise TrimEquivalenceError(
+                f"探針 {i} 數值不符，最大絕對誤差 {diff:.3e}。\n"
+                "BERT 剪裁不等價 —— 這會默默影響音質。\n"
+                "請在 config.yaml 設 latency.trim_bert: false 後重新啟動，"
+                "並回報 transformers 版本。"
+            )
+
+
 def trim(mlm_model: nn.Module) -> tuple[nn.Module, dict]:
     """原地剪裁並回傳 (替換用的模組, 說明用的統計資料)。
 

@@ -76,6 +76,15 @@ class Latency:
 
     profile: str = "quality"
 
+    # 單一請求是否可以用 profile 參數要求 low。
+    #
+    # 預設 false：low 會啟用 upstream 自評 Medium quality 的 streaming_mode，
+    # 若開放給呼叫端，任何客戶端都能繞過「不犧牲音質」這個約束，而且不會
+    # 留下任何痕跡。要讓呼叫端有這個選擇，必須由 server 端明確開啟。
+    #
+    # 若 profile 本身就設成 low，那是 server 擁有者的明確選擇，不受此限。
+    allow_low_profile: bool = False
+
     # upstream 預設 cut1 = 每 4 句一組。cut3 = 逐句（TTFA 更低，但改變
     # 送進 GPT 的文本 → 改變韻律，屬於會影響輸出的調整）。
     text_split_method: str = "cut1"

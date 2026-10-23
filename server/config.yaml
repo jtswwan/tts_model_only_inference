@@ -48,6 +48,10 @@ latency:
   #          但依 upstream 自己的標註，音質較差。
   profile: quality
 
+  # 單一請求能否用 profile 參數要求 low。預設 false —— 否則任何呼叫端都能
+  # 繞過「不犧牲音質」這個約束，而且不留痕跡。
+  allow_low_profile: false
+
   # cut1 = 每 4 句一組（upstream 預設）。cut3 = 逐句，TTFA 更低，但會改變
   # 送進 GPT 的文本 → 改變韻律。要調請明確知道在換什麼。
   text_split_method: cut1

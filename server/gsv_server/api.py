@@ -73,8 +73,22 @@ def _check_lang(lang: str | None) -> None:
 
 
 def _check_profile(profile: str | None) -> None:
-    if profile is not None and profile not in ("quality", "low"):
+    if profile is None:
+        return
+    if profile not in ("quality", "low"):
         raise HTTPException(status_code=400, detail="profile 只接受 quality 或 low")
+    if profile == "low":
+        settings: Settings = _state["settings"]
+        # server 本身就設成 low 的話，那是擁有者的選擇，不再攔。
+        if settings.latency.profile != "low" and not settings.latency.allow_low_profile:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "本 server 不接受單一請求指定 profile=low。"
+                    "low 會啟用 streaming_mode，upstream 自評為 Medium quality。"
+                    "要開放請在 config.yaml 設 latency.allow_low_profile: true。"
+                ),
+            )
 
 
 # ---------------------------------------------------------------- 生命週期
@@ -190,8 +204,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if lang is not None and lang not in ALLOWED_LANGS:
                     await ws.send_json({"error": f"text_lang 只接受 {sorted(ALLOWED_LANGS)}"})
                     continue
-                if profile is not None and profile not in ("quality", "low"):
-                    await ws.send_json({"error": "profile 只接受 quality 或 low"})
+                try:
+                    _check_profile(profile)
+                except HTTPException as exc:
+                    await ws.send_json({"error": exc.detail})
                     continue
 
                 eng = engine()

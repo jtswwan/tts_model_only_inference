@@ -383,6 +383,44 @@ GPT-SoVITS 官方 README「V2Pro Release Notes」原文：
 | 文字前端結果按文本快取（§5.7） | 同一文本 → 同一音素序列與 BERT 特徵 |
 | 刪除訓練 / 匯出 / 其他介面程式碼（§7） | 推論路徑不經過 |
 
+### 這些約束是程式強制的，不只是預設值
+
+「預設正確」不夠 —— 音質問題不會出現在任何 log 或 metric 上，所以有三條路可以悄悄繞過約束，三條都堵了。
+
+**1. BERT 剪裁的等價性在啟動時實際驗證，不通過就拒絕啟動**
+
+剪裁前先用五段探針文字跑一次原模型留下輸出（取法與 `TextPreprocessor.py:196-197` 完全相同），剪完後逐位元比對。**不是逐位元相同就 raise `TrimEquivalenceError` 並拒絕啟動**，而不是印個警告繼續跑。
+
+不給容差是刻意的：兩次前向是同樣的輸入、權重與運算順序，結果本來就該完全相同。有差異就代表剪裁邏輯不成立（最可能是 `hidden_states` 的負索引補齊沒對上，例如換了 transformers 版本），而不是浮點誤差。寧可開不起來，也不要悄悄變差。
+
+失敗時訊息會指示設 `latency.trim_bert: false` 重新啟動 —— 那只會變慢，不會變差。
+
+**2. 單一請求不能要求 `profile=low`**
+
+`latency.allow_low_profile` 預設 `false`。否則任何呼叫端送 `{"profile":"low"}` 就能拿到 upstream 自評 Medium quality 的輸出，而且不留痕跡。要開放必須由 server 端明確設定。HTTP 回 **403**，WebSocket 回同樣的理由。
+
+若 `latency.profile` 本身就設成 `low`，那是 server 擁有者的明確選擇，不受此限。
+
+**3. 任何偏離 upstream 預設的設定會在啟動時列出來**
+
+涵蓋 `profile`、`fixed_length_chunk`、`text_split_method`、`speed_factor`、以及三個取樣參數。例如 `speed_factor` 一旦不是 `1.0`，`TTS.py:1099` 會強制關閉 `split_bucket` 並對輸出音訊重採樣 —— 這種連帶效果不該安靜發生。
+
+同一份資訊也出現在 `GET /health` 的 `quality` 區塊，可以從外部確認，不必翻 log：
+
+```json
+{
+  "quality": {
+    "clean": true,
+    "bert_trim_verified": true,
+    "bert_trim_enabled": true,
+    "allow_low_profile": false,
+    "deviations": []
+  }
+}
+```
+
+`clean: true` 表示所有會影響輸出的設定都與 upstream 預設一致，且 BERT 剪裁已通過等價自檢。
+
 ### ❌ 原計劃中被否決的項目
 
 以下是初版計劃列為「會做」、但實作時查證後證明做不到或代價不符的。留在這裡
@@ -588,7 +626,7 @@ TTFA 與第一個 chunk 的 token 數成正比 → 切得細則延遲低。
 | `GET /tts?stream=1` 或 WebSocket | **chunked raw PCM 串流**，供低延遲播放 |
 | `POST /model` | 切換模型 / 版本，切換後自動重新暖機（§5.3、§5.4） |
 | `POST /reference` | 切換參考音訊 / 參考文本，自動重新暖機 |
-| `GET /health` | 狀態、當前模型與版本、裝置、暖機是否完成 |
+| `GET /health` | 狀態、當前模型與版本、裝置、暖機是否完成，以及 `quality` 區塊（見 §4） |
 | `GET /metrics` | TTFA、每 token 時間、佇列長度 |
 
 修正前一版的問題：
@@ -596,6 +634,7 @@ TTFA 與第一個 chunk 的 token 數成正比 → 切得細則延遲低。
 - **不接受客戶端指定輸出路徑**（原本是任意檔案寫入）
 - 錯誤回**正確的 HTTP status code**，不是 200 + `str(e)`
 - 設定走 YAML + env，**零寫死路徑**
+- 請求指定 `profile=low` 回 **403**，除非 server 端開放（見 §4）
 
 `/metrics` 是新增的 —— 既然目標是低延遲，就要能量測。
 

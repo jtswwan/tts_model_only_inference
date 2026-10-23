@@ -137,6 +137,8 @@ class Engine:
         self._total: deque[float] = deque(maxlen=128)
         self.warm = False
         self.trim_stats: dict[str, Any] = {}
+        self.trim_verified = False
+        self.quality_notes: list[str] = []
 
         t0 = time.perf_counter()
         self.config = _build_tts_config(settings)
@@ -144,23 +146,85 @@ class Engine:
         self.load_seconds = time.perf_counter() - t0
 
         if settings.latency.trim_bert:
+            # 剪裁前先留下原模型對探針文字的輸出。取法與 TextPreprocessor
+            # 實際使用的那條路徑完全相同，剪完後逐位元比對。
+            #
+            # 這個自檢是刻意設計成「不通過就拒絕啟動」的：剪裁不等價會默默
+            # 影響音質，而音質問題不會在任何 log 或 metric 上出現。寧可開不
+            # 起來也不要悄悄變差。
+            baseline = bert_trim.probe(
+                self.tts.bert_model, self.tts.bert_tokenizer, self.config.device
+            )
             wrapper, stats = bert_trim.trim(self.tts.bert_model)
+            after = bert_trim.probe(wrapper, self.tts.bert_tokenizer, self.config.device)
+            bert_trim.assert_equivalent(baseline, after)
+            self.trim_verified = True
+
             self.tts.bert_model = wrapper
             self.tts.text_preprocessor.bert_model = wrapper
             self.trim_stats = stats
             log.info(
-                "BERT 已剪裁：%d → %d 層，省下 %s 個參數（%.2f%%）",
+                "BERT 已剪裁：%d → %d 層，省下 %s 個參數（%.2f%%）；"
+                "%d 段探針文字的輸出逐位元相同",
                 stats["num_layers_original"],
                 stats["num_layers_kept"],
                 f"{stats['params_removed']:,}",
                 stats["removed_pct"],
+                len(baseline),
             )
+            del baseline, after
 
         self.text_cache = _PhoneBertCache(settings.latency.text_cache_size)
         pre = self.tts.text_preprocessor
         pre.get_phones_and_bert = self.text_cache.wrap(pre.get_phones_and_bert)
 
+        self._warn_quality_deviations()
         self.warmup()
+
+    def _warn_quality_deviations(self) -> None:
+        """把任何會影響輸出的設定偏離大聲講出來。
+
+        這些都不是錯誤，是使用者可以選的。但它們會改變音訊，所以不該安靜
+        生效 —— 音質問題不會出現在任何 metric 上，只能靠事先講明。
+        """
+        s = self.settings
+        lat, samp = s.latency, s.sampling
+        notes: list[str] = []
+
+        if lat.profile != "quality":
+            notes.append(
+                "latency.profile=low：啟用 streaming_mode，upstream 在 "
+                "TTS.py:1027 自評為 Medium quality，且會強制 parallel_infer=False "
+                "使 AR 改走 infer_panel_naive（另一條程式碼路徑）"
+            )
+        if lat.fixed_length_chunk:
+            notes.append("latency.fixed_length_chunk=true：upstream 在 TTS.py:1033 自評為 lower quality")
+        if lat.text_split_method != "cut1":
+            notes.append(
+                f"latency.text_split_method={lat.text_split_method}（upstream 預設 cut1）："
+                "切句粒度改變送進 GPT 的文本，會改變韻律"
+            )
+        if samp.speed_factor != 1.0:
+            notes.append(
+                f"sampling.speed_factor={samp.speed_factor}：TTS.py:1099 會因此強制關閉 "
+                "split_bucket，並對輸出音訊重採樣"
+            )
+        if (samp.top_k, samp.top_p, samp.temperature) != (5, 1.0, 1.0):
+            notes.append(
+                f"取樣參數 top_k={samp.top_k} top_p={samp.top_p} "
+                f"temperature={samp.temperature}（upstream 執行時預設 5 / 1 / 1）"
+            )
+        if not lat.trim_bert:
+            # 這個方向是變慢而非變差，列出來只是說明為何沒有剪裁
+            log.info("latency.trim_bert=false：BERT 未剪裁（不影響音質，只是較慢）")
+
+        self.quality_notes = notes
+        if notes:
+            log.warning("以下設定會改變輸出，相對 upstream 預設：")
+            for n in notes:
+                log.warning("  - %s", n)
+        else:
+            log.info("所有會影響輸出的設定都與 upstream 預設一致")
 
     # ---- 暖機 ----
 
@@ -343,4 +407,14 @@ class Engine:
             "text_split_method": s.latency.text_split_method,
             "reference_audio": s.reference.audio,
             "text_lang": s.text_lang,
+            # 音質狀態。clean 為 true 表示所有會影響輸出的設定都與 upstream
+            # 預設一致，且 BERT 剪裁已通過逐位元等價自檢。
+            "quality": {
+                "clean": not self.quality_notes
+                and (self.trim_verified or not s.latency.trim_bert),
+                "bert_trim_verified": self.trim_verified,
+                "bert_trim_enabled": s.latency.trim_bert,
+                "allow_low_profile": s.latency.allow_low_profile,
+                "deviations": self.quality_notes,
+            },
         }
