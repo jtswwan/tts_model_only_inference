@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPT-SoVITS 推論控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%235aa9f0'/%3E%3Cpath d='M4 10V6M7 12V4M10 9V7M13 11V5' stroke='%2306121f' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --line: #2a2f3a;
+    --fg: #e6e8ec; --fg-dim: #9aa3b2; --fg-faint: #6b7280;
+    --accent: #5aa9f0; --ok: #46c08a; --warn: #e0b341; --bad: #e2605a;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f6f7f9; --panel: #fff; --panel-2: #f0f2f5; --line: #dfe3e8;
+      --fg: #1a1d23; --fg-dim: #5a6472; --fg-faint: #8b94a3;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 system-ui, -apple-system, "Noto Sans TC", sans-serif;
+    padding: 0 16px 48px;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; }
+  header {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 24px 0 18px; border-bottom: 1px solid var(--line); margin-bottom: 22px;
+  }
+  h1 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--fg-faint); font-size: 13px; font-family: var(--mono); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+  section {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px 18px;
+  }
+  section.wide { grid-column: 1 / -1; }
+  h2 {
+    font-size: 12px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase;
+    color: var(--fg-dim); margin: 0 0 12px;
+  }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13.5px; }
+  .kv dt { color: var(--fg-dim); white-space: nowrap; }
+  .kv dd { margin: 0; font-family: var(--mono); font-size: 13px; word-break: break-all; }
+  label { display: block; font-size: 12.5px; color: var(--fg-dim); margin: 12px 0 5px; }
+  label:first-of-type { margin-top: 0; }
+  select, input[type=text], textarea {
+    width: 100%; background: var(--panel-2); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px;
+    font: inherit; font-size: 13.5px;
+  }
+  select, input { font-family: var(--mono); font-size: 12.5px; }
+  textarea { font-family: inherit; resize: vertical; min-height: 92px; line-height: 1.6; }
+  button {
+    background: var(--accent); color: #06121f; border: 0; border-radius: 7px;
+    padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--fg-dim); border: 1px solid var(--line); font-weight: 500; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button:not(:disabled):hover { filter: brightness(1.08); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+  .hero { text-align: center; padding: 6px 0 2px; }
+  .hero .n { font-family: var(--mono); font-size: 54px; font-weight: 600; line-height: 1; letter-spacing: -0.03em; }
+  .hero .u { font-size: 17px; color: var(--fg-dim); margin-left: 3px; }
+  .hero .l { font-size: 12px; color: var(--fg-dim); letter-spacing: 0.06em; text-transform: uppercase; margin-top: 7px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px; margin-top: 16px; }
+  .tile { background: var(--panel-2); border-radius: 8px; padding: 10px 11px; }
+  .tile .n { font-family: var(--mono); font-size: 18px; font-weight: 600; }
+  .tile .l { font-size: 11px; color: var(--fg-faint); margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: right; color: var(--fg-dim); font-weight: 500; font-size: 11px;
+       text-transform: uppercase; letter-spacing: 0.05em; padding: 0 0 7px; }
+  th:first-child, td:first-child { text-align: left; }
+  td { font-family: var(--mono); padding: 5px 0; border-top: 1px solid var(--line); text-align: right; }
+  .msg { margin-top: 12px; padding: 9px 12px; border-radius: 7px; font-size: 13px;
+         border-left: 3px solid var(--line); background: var(--panel-2); display: none; }
+  .msg.show { display: block; }
+  .msg.err { border-left-color: var(--bad); }
+  .msg.ok { border-left-color: var(--ok); }
+  .msg pre { margin: 5px 0 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+  audio { width: 100%; margin-top: 12px; }
+  .note { font-size: 12px; color: var(--fg-faint); margin-top: 9px; line-height: 1.5; }
+  .pill { font-family: var(--mono); font-size: 11px; padding: 2px 7px; border-radius: 20px;
+          background: var(--panel-2); color: var(--fg-dim); border: 1px solid var(--line); }
+  .bars { display: flex; align-items: flex-end; gap: 2px; height: 72px; margin-top: 14px; }
+  .bars i { flex: 1 1 auto; min-width: 2px; max-width: 14px; background: var(--accent);
+            border-radius: 2px 2px 0 0; opacity: .85; }
+  .bars.empty { align-items: center; justify-content: center; color: var(--fg-faint); font-size: 12px; }
+  .bars i.slow { background: var(--warn); }
+  .spin { display: inline-block; width: 11px; height: 11px; border: 2px solid currentColor;
+          border-right-color: transparent; border-radius: 50%; animation: s .7s linear infinite; }
+  @keyframes s { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>GPT-SoVITS 推論控制台</h1>
+  <span class="sub" id="hdr">連線中…</span>
+</header>
+
+<div class="grid">
+
+  <!-- ─── TTFA 主視覺 ─── -->
+  <section>
+    <h2>首字延遲 TTFA</h2>
+    <div class="hero">
+      <div><span class="n" id="ttfa">—</span><span class="u">ms</span></div>
+      <div class="l">最近一次（瀏覽器端量測）</div>
+    </div>
+    <div class="tiles">
+      <div class="tile"><div class="n" id="ttfaMed">—</div><div class="l">中位數 ms</div></div>
+      <div class="tile"><div class="n" id="ttfaMin">—</div><div class="l">最小 ms</div></div>
+      <div class="tile"><div class="n" id="rtf">—</div><div class="l">即時倍率</div></div>
+    </div>
+    <div class="bars" id="bars"></div>
+    <div class="note">長條是歷史 TTFA，黃色代表即時倍率 &lt; 1（生成追不上播放，串流會斷）。
+      量的是瀏覽器收到第一個 byte 的時間，不是伺服器自己回報的數字。</div>
+  </section>
+
+  <!-- ─── 環境 ─── -->
+  <section>
+    <h2>環境</h2>
+    <dl class="kv" id="env"><dd>載入中…</dd></dl>
+    <label for="device">運算裝置</label>
+    <select id="device"></select>
+    <label for="half" style="display:flex;align-items:center;gap:7px;margin-top:10px">
+      <input type="checkbox" id="half" style="width:auto;margin:0"> fp16（CPU 上會被強制關閉）
+    </label>
+    <div class="row">
+      <button id="applyDev">套用（重新載入模型）</button>
+    </div>
+    <div class="note">切換裝置會重建引擎並重新暖機。暖機時間不影響之後每個請求的延遲。</div>
+    <div class="msg" id="devMsg"></div>
+  </section>
+
+  <!-- ─── 模型與參考音訊 ─── -->
+  <section class="wide">
+    <h2>模型與參考音訊</h2>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px">
+      <div>
+        <label for="vits">SoVITS (s2) — 版本由檔頭判定</label>
+        <select id="vits"></select>
+        <label for="t2s">GPT (s1)</label>
+        <select id="t2s"></select>
+        <div class="row"><button id="applyModel">套用模型</button>
+          <span class="pill" id="verPill">—</span></div>
+        <div class="msg" id="modelMsg"></div>
+      </div>
+      <div>
+        <label for="ref">參考音訊（必須 3–10 秒）</label>
+        <select id="ref"></select>
+        <label for="refText">參考音訊的逐字稿（不符會影響音色）</label>
+        <textarea id="refText" rows="2" style="min-height:62px"></textarea>
+        <div class="row"><button id="applyRef">套用參考音訊</button></div>
+        <div class="msg" id="refMsg"></div>
+      </div>
+    </div>
+    <div class="note">清單來自 <code>GPT_SoVITS/pretrained_models/</code> 的掃描。要裝全新的一組，
+      用 <code>scripts/add_voice.py</code> —— 它會檢查版本、底模、音訊長度與符號集是否相符。</div>
+  </section>
+
+  <!-- ─── 合成 ─── -->
+  <section class="wide">
+    <h2>合成</h2>
+    <textarea id="text">慢慢來也沒關係，只要沒有停下來，你其實一直都在前進。</textarea>
+    <div class="row">
+      <button id="go">合成並量測</button>
+      <button class="ghost" id="dl" disabled>下載 WAV</button>
+      <span class="pill" id="synthInfo">—</span>
+    </div>
+    <audio id="player" controls></audio>
+    <div class="msg" id="synthMsg"></div>
+  </section>
+
+  <!-- ─── 音質狀態 ─── -->
+  <section>
+    <h2>音質狀態</h2>
+    <dl class="kv" id="quality"><dd>載入中…</dd></dl>
+    <div class="note" id="qualityNote"></div>
+  </section>
+
+  <!-- ─── 執行統計 ─── -->
+  <section>
+    <h2>執行統計</h2>
+    <dl class="kv" id="stats"><dd>載入中…</dd></dl>
+  </section>
+
+  <!-- ─── 歷史 ─── -->
+  <section class="wide">
+    <h2>最近的請求</h2>
+    <table><thead><tr>
+      <th>時間</th><th>字數</th><th>TTFA ms</th><th>總時間 ms</th><th>音訊 s</th><th>即時倍率</th>
+    </tr></thead><tbody id="hist"><tr><td colspan="6" style="color:var(--fg-faint)">尚無資料</td></tr></tbody></table>
+  </section>
+
+</div>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 0) => (v === null || v === undefined ? "—" : Number(v).toFixed(d));
+let STATE = { health: null, metrics: null, candidates: null, runtime: null };
+let LAST_WAV = null, CLIENT_TTFA = [];
+
+function msg(el, text, kind) {
+  el.className = "msg show" + (kind ? " " + kind : "");
+  el.innerHTML = typeof text === "string" ? text : "<pre>" + esc(JSON.stringify(text, null, 1)) + "</pre>";
+}
+function esc(s) { const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+function clear(el) { el.className = "msg"; el.innerHTML = ""; }
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  const body = await res.text();
+  let data = null;
+  try { data = body ? JSON.parse(body) : null; } catch (_) { data = { detail: body }; }
+  if (!res.ok) { const e = new Error((data && data.detail) || res.statusText); e.status = res.status; e.data = data; throw e; }
+  return data;
+}
+
+/* ─────────── 環境 ─────────── */
+function renderRuntime() {
+  const r = STATE.runtime, h = STATE.health;
+  if (!r) return;
+  const rows = [
+    ["平台", r.platform], ["Python", r.python],
+    ["torch", r.torch + (r.cuda_available ? "" : "（無 CUDA）")],
+    ["torchaudio", r.torchaudio || "未安裝"],
+    ["CPU 執行緒", r.cpu_threads],
+  ];
+  if (r.cuda_devices.length) {
+    r.cuda_devices.forEach(d => rows.push([
+      "cuda:" + d.index,
+      `${d.name} · ${d.total_memory_gb}GB · sm ${d.capability}${d.fp16_ok ? " · fp16 ✓" : " · fp16 ✗"}`,
+    ]));
+  }
+  if (h) rows.push(["目前使用", h.device + (h.is_half ? " · fp16" : " · fp32")]);
+  $("env").innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(String(v))}</dd>`).join("");
+
+  const sel = $("device");
+  if (!sel.dataset.filled) {
+    const opts = ["auto", "cpu"];
+    r.cuda_devices.forEach(d => opts.push("cuda:" + d.index));
+    sel.innerHTML = opts.map(o => `<option value="${o}">${o}</option>`).join("");
+    sel.dataset.filled = "1";
+    if (h) { sel.value = r.cuda_devices.length ? (h.device.startsWith("cuda") ? h.device : "cpu") : "cpu"; }
+  }
+  if (h && !$("half").dataset.touched) $("half").checked = !!h.is_half;
+}
+
+/* ─────────── 候選 ─────────── */
+function renderCandidates() {
+  const c = STATE.candidates, h = STATE.health;
+  if (!c) return;
+  const vits = $("vits");
+  vits.innerHTML = c.sovits.map(s => {
+    const tag = s.version ? `[${s.version}${s.is_lora ? " LoRA" : ""}]` : "[版本未知]";
+    return `<option value="${esc(s.path)}" data-version="${esc(s.version || "")}" data-lora="${s.is_lora ? 1 : 0}">${tag} ${esc(s.path.split("/").pop())} · ${s.size_mb}MB</option>`;
+  }).join("") || `<option value="">（找不到 .pth）</option>`;
+  $("t2s").innerHTML = c.gpt.map(g =>
+    `<option value="${esc(g.path)}">${esc(g.path.split("/").pop())} · ${g.size_mb}MB</option>`).join("")
+    || `<option value="">（找不到 .ckpt）</option>`;
+  $("ref").innerHTML = c.references.map(r => {
+    const d = r.seconds ? `${r.seconds}s` : "長度未知";
+    const mark = r.usable === false ? " ⚠ 不在 3–10s" : (r.usable === null ? " ⚠ 非 PCM" : "");
+    return `<option value="${esc(r.path)}">${esc(r.path.split("/").pop())} · ${d}${mark}</option>`;
+  }).join("") || `<option value="">（找不到 .wav）</option>`;
+
+  if (h) {
+    for (const [sel, val] of [[vits, h.reference_audio && null], [$("ref"), h.reference_audio]]) {
+      if (val && [...sel.options].some(o => o.value === val)) sel.value = val;
+    }
+    if ($("refText").value === "") $("refText").value = h.reference_text || "";
+  }
+  onVitsChange();
+}
+function onVitsChange() {
+  const o = $("vits").selectedOptions[0];
+  if (!o) return;
+  const v = o.dataset.version, lora = o.dataset.lora === "1";
+  $("verPill").textContent = v ? `version=${v}${lora ? " · 需要底模" : ""}` : "版本未知";
+}
+
+/* ─────────── 音質 / 統計 ─────────── */
+function renderQuality() {
+  const h = STATE.health, m = STATE.metrics;
+  if (!h || !h.quality) return;
+  const q = h.quality, t = (m && m.bert_trim) || null;
+  const rows = [
+    ["整體", q.clean ? "✓ 與 upstream 預設一致" : `⚠ 有 ${q.deviations.length} 項偏離`],
+    ["BERT 剪裁等價性", q.bert_trim_enabled ? (q.bert_trim_verified ? "✓ 逐位元驗證通過" : "✗ 未驗證") : "未啟用"],
+    ["profile", h.latency_profile + (q.allow_low_profile ? "（允許請求指定 low）" : "（不允許請求指定 low）")],
+    ["切句方式", h.text_split_method],
+  ];
+  if (t) rows.push(["BERT 層數", `${t.num_layers_original} → ${t.num_layers_kept}（省 ${t.removed_pct}% 參數）`]);
+  $("quality").innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+  $("qualityNote").textContent = q.clean
+    ? "所有會影響輸出的設定都與 upstream 預設一致。"
+    : "以下設定會改變輸出： " + q.deviations.join("； ");
+}
+function renderStats() {
+  const m = STATE.metrics, h = STATE.health;
+  if (!m) return;
+  const up = m.uptime_seconds, hhmm = up >= 3600
+    ? `${Math.floor(up / 3600)}h ${Math.floor((up % 3600) / 60)}m`
+    : up >= 60 ? `${Math.floor(up / 60)}m ${Math.round(up % 60)}s` : `${fmt(up, 0)}s`;
+  const rows = [
+    ["執行時間", hhmm],
+    ["請求總數", m.requests_total],
+    ["產生音訊", fmt(m.audio_seconds_total, 1) + " s"],
+    ["模型載入", fmt(m.model_load_seconds, 2) + " s"],
+    ["版本 / 取樣率", (h ? h.version + " · " + h.sampling_rate + " Hz" : "—")],
+  ];
+  if (m.sv_cache) rows.push(["聲紋快取", `${m.sv_cache.hits} 命中 / ${m.sv_cache.misses} 未命中`]);
+  if (m.text_cache) rows.push(["文字前端快取", `${m.text_cache.hits} 命中 / ${m.text_cache.misses} 未命中`]);
+  $("stats").innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(String(v))}</dd>`).join("");
+}
+function renderHistory() {
+  const m = STATE.metrics;
+  if (!m || !m.history) return;
+  const hist = m.history.slice(-14).reverse();
+  $("hist").innerHTML = hist.length ? hist.map(r => {
+    const t = new Date(r.at * 1000).toLocaleTimeString();
+    const slow = r.realtime_factor !== null && r.realtime_factor < 1;
+    return `<tr><td>${esc(t)}</td><td>${r.chars}</td><td>${fmt(r.ttfa_ms, 0)}</td>
+      <td>${fmt(r.total_ms, 0)}</td><td>${fmt(r.audio_seconds, 2)}</td>
+      <td style="color:${slow ? "var(--warn)" : "inherit"}">${fmt(r.realtime_factor, 2)}×</td></tr>`;
+  }).join("") : `<tr><td colspan="6" style="color:var(--fg-faint)">尚無資料</td></tr>`;
+
+  const all = m.history;
+  if (!all.length) {
+    $("bars").className = "bars empty";
+    $("bars").textContent = "尚無量測資料 — 在下方「合成」送出一次就會出現";
+  }
+  if (all.length) {
+    const ttfas = all.map(r => r.ttfa_ms).filter(Number.isFinite).sort((a, b) => a - b);
+    $("ttfaMed").textContent = fmt(ttfas[Math.floor(ttfas.length / 2)], 0);
+    $("ttfaMin").textContent = fmt(ttfas[0], 0);
+    const last = all[all.length - 1];
+    $("rtf").textContent = fmt(last.realtime_factor, 2) + "×";
+    if (CLIENT_TTFA.length === 0) $("ttfa").textContent = fmt(last.ttfa_ms, 0);
+    const max = Math.max(...all.map(r => r.ttfa_ms), 1);
+    $("bars").className = "bars";
+    $("bars").innerHTML = all.slice(-60).map(r => {
+      const slow = r.realtime_factor !== null && r.realtime_factor < 1;
+      return `<i class="${slow ? "slow" : ""}" style="height:${Math.max(3, r.ttfa_ms / max * 100)}%"
+        title="TTFA ${fmt(r.ttfa_ms, 0)}ms · ${r.chars}字 · ${fmt(r.realtime_factor, 2)}×"></i>`;
+    }).join("");
+  }
+}
+
+/* ─────────── 輪詢 ─────────── */
+async function refresh() {
+  try {
+    STATE.health = await api("/health");
+    $("hdr").innerHTML = `<span class="dot" style="background:var(--ok)"></span>就緒 · ${esc(STATE.health.device)} · ${esc(STATE.health.version)}`;
+  } catch (e) {
+    STATE.health = null;
+    const loading = e.status === 503;
+    $("hdr").innerHTML = `<span class="dot" style="background:${loading ? "var(--warn)" : "var(--bad)"}"></span>` +
+      (loading ? "載入模型中（暖機）…" : "連不上 server");
+    return;
+  }
+  try { STATE.metrics = await api("/metrics"); } catch (_) {}
+  if (!STATE.runtime) { try { STATE.runtime = await api("/runtime"); } catch (_) {} }
+  try { STATE.candidates = await api("/candidates"); } catch (_) {}
+  renderRuntime(); renderCandidates(); renderQuality(); renderStats(); renderHistory();
+}
+
+/* ─────────── 合成（瀏覽器端量 TTFA） ─────────── */
+function wavBlob(pcmBytes, sampleRate) {
+  const n = pcmBytes.length, buf = new ArrayBuffer(44 + n), v = new DataView(buf);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, "RIFF"); v.setUint32(4, 36 + n, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, "data"); v.setUint32(40, n, true);
+  new Uint8Array(buf, 44).set(pcmBytes);
+  return new Blob([buf], { type: "audio/wav" });
+}
+
+async function synthesize() {
+  const text = $("text").value.trim();
+  if (!text) { msg($("synthMsg"), "請先輸入文字", "err"); return; }
+  clear($("synthMsg"));
+  const btn = $("go"); btn.disabled = true;
+  const original = btn.textContent; btn.innerHTML = '<span class="spin"></span> 合成中';
+  $("synthInfo").textContent = "—";
+  try {
+    const t0 = performance.now();
+    const res = await fetch("/tts/stream?text=" + encodeURIComponent(text));
+    if (!res.ok) throw new Error((await res.text()) || res.statusText);
+    const sr = parseInt(res.headers.get("X-Sample-Rate") || "32000", 10);
+    const reader = res.body.getReader();
+    let first = null, total = 0;
+    const parts = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (first === null) {
+        first = performance.now() - t0;
+        $("ttfa").textContent = fmt(first, 0);
+      }
+      parts.push(value); total += value.length;
+    }
+    const elapsed = (performance.now() - t0) / 1000;
+    const pcm = new Uint8Array(total);
+    let off = 0; for (const p of parts) { pcm.set(p, off); off += p.length; }
+    const secs = total / 2 / sr;
+    LAST_WAV = wavBlob(pcm, sr);
+    $("player").src = URL.createObjectURL(LAST_WAV);
+    $("dl").disabled = false;
+    CLIENT_TTFA.push(first);
+    $("synthInfo").textContent =
+      `TTFA ${fmt(first, 0)}ms · 總 ${fmt(elapsed * 1000, 0)}ms · 音訊 ${fmt(secs, 2)}s · ${fmt(secs / elapsed, 2)}×`;
+    if (secs / elapsed < 1) {
+      msg($("synthMsg"), `即時倍率 ${fmt(secs / elapsed, 2)}× < 1 —— 生成追不上播放，串流在這個長度會斷。`, "err");
+    }
+    refresh();
+  } catch (e) {
+    msg($("synthMsg"), esc(String(e.message || e)), "err");
+  } finally {
+    btn.disabled = false; btn.textContent = original;
+  }
+}
+
+/* ─────────── 套用 ─────────── */
+function busy(btn, on, label) {
+  btn.disabled = on;
+  if (on) { btn.dataset.t = btn.textContent; btn.innerHTML = '<span class="spin"></span> ' + label; }
+  else if (btn.dataset.t) btn.textContent = btn.dataset.t;
+}
+async function apply(btn, el, path, body, label) {
+  clear(el); busy(btn, true, label);
+  try {
+    const r = await api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    msg(el, "✓ 已套用並完成暖機", "ok");
+    await refresh();
+    return r;
+  } catch (e) {
+    msg(el, (e.status === 400 ? "被拒絕（400）：<pre>" + esc(String(e.message)) + "</pre>" : esc(String(e.message || e))), "err");
+  } finally { busy(btn, false); }
+}
+
+/* ─────────── 綁定 ─────────── */
+$("go").onclick = synthesize;
+$("vits").onchange = onVitsChange;
+$("half").onchange = () => { $("half").dataset.touched = "1"; };
+$("dl").onclick = () => {
+  if (!LAST_WAV) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(LAST_WAV);
+  a.download = "tts_" + Date.now() + ".wav";
+  a.click();
+};
+$("applyDev").onclick = () => apply($("applyDev"), $("devMsg"), "/model",
+  { device: $("device").value, is_half: $("half").checked }, "重新載入");
+$("applyModel").onclick = () => apply($("applyModel"), $("modelMsg"), "/model", {
+  version: $("vits").selectedOptions[0] ? ($("vits").selectedOptions[0].dataset.version || undefined) : undefined,
+  vits: $("vits").value || undefined,
+  t2s: $("t2s").value || undefined,
+}, "重新載入");
+$("applyRef").onclick = () => apply($("applyRef"), $("refMsg"), "/reference",
+  { audio: $("ref").value || undefined, text: $("refText").value }, "重新暖機");
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

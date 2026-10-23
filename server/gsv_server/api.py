@@ -15,14 +15,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Iterator
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import wavio
@@ -61,6 +63,8 @@ class ModelRequest(BaseModel):
     version: str | None = Field(None, description="v2Pro / v2ProPlus / v4")
     t2s: str | None = Field(None, description="GPT (s1) 權重路徑")
     vits: str | None = Field(None, description="SoVITS (s2) 權重路徑")
+    device: str | None = Field(None, description="auto / cpu / cuda / cuda:0 …")
+    is_half: bool | None = Field(None, description="fp16。CPU 上會被 upstream 強制關閉")
 
 
 class ReferenceRequest(BaseModel):
@@ -263,6 +267,117 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception:  # noqa: BLE001
                 pass
 
+    # ------------------------------------------------------------ 控制台
+
+    CONSOLE = Path(__file__).resolve().parent / "console.html"
+
+    @app.get("/", include_in_schema=False)
+    def console() -> Response:
+        if not CONSOLE.is_file():
+            return HTMLResponse("<h1>找不到 console.html</h1>", status_code=500)
+        # 單一 HTML 檔、不依賴任何 CDN —— 必須能在離線的機器上操作本機 server
+        return FileResponse(CONSOLE, media_type="text/html; charset=utf-8")
+
+    @app.get("/candidates", summary="掃描可用的模型與參考音訊")
+    def candidates() -> dict[str, Any]:
+        """列出 pretrained_models/ 底下可用的候選。
+
+        SoVITS 的版本是讀「檔頭前兩個 byte」判定的（process_ckpt.py:100），
+        很便宜。GPT 的 .ckpt 不載入，只列檔名與大小 —— 載一次要好幾百 MB。
+        """
+        import wave
+
+        from process_ckpt import head2version
+
+        # 這些是支援模型，不是角色模型，不該出現在選單裡
+        SUPPORT = ("/sv/", "/fast_langdetect/", "/chinese-hubert-base/",
+                   "/chinese-roberta-wwm-ext-large/", "/g2pw-chinese/")
+
+        settings: Settings = _state["settings"]
+        root = Path(settings.resolve("GPT_SoVITS/pretrained_models"))
+        sovits: list[dict[str, Any]] = []
+        gpt: list[dict[str, Any]] = []
+        refs: list[dict[str, Any]] = []
+        if not root.is_dir():
+            return {"root": str(root), "sovits": [], "gpt": [], "references": []}
+
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = os.path.relpath(path, Path(settings.resolve(".")))
+            if any(k in "/" + rel.replace(os.sep, "/") for k in SUPPORT):
+                continue
+            size_mb = round(path.stat().st_size / 1e6, 1)
+            suffix = path.suffix.lower()
+            if suffix == ".pth":
+                entry: dict[str, Any] = {"path": rel, "size_mb": size_mb}
+                try:
+                    with open(path, "rb") as f:
+                        head = f.read(2)
+                    if head in head2version:
+                        tv, mv, lora = head2version[head]
+                        entry.update({"version": mv, "text_version": tv, "is_lora": bool(lora),
+                                      "header": head.decode("latin-1")})
+                    else:
+                        # 檔頭是 PK 的是舊格式，版本靠檔案大小猜（process_ckpt.py:111-126）
+                        entry.update({"version": None, "header": head.decode("latin-1", "replace")})
+                except Exception as exc:  # noqa: BLE001
+                    entry["error"] = f"{type(exc).__name__}: {exc}"
+                sovits.append(entry)
+            elif suffix == ".ckpt":
+                gpt.append({"path": rel, "size_mb": size_mb})
+            elif suffix == ".wav":
+                entry = {"path": rel, "size_mb": size_mb}
+                try:
+                    with wave.open(str(path)) as w:
+                        sr, n = w.getframerate(), w.getnframes()
+                        entry.update({"sample_rate": sr, "channels": w.getnchannels(),
+                                      "seconds": round(n / sr, 2) if sr else None})
+                        # TTS.py:816 要求換算成 16kHz 後樣本數在 48000~160000
+                        entry["usable"] = bool(sr and 3.0 <= n / sr <= 10.0)
+                except Exception:  # noqa: BLE001
+                    # 非 PCM（例如 float32）的 wav，wave 模組讀不了
+                    entry.update({"sample_rate": None, "usable": None,
+                                  "note": "非 PCM 格式，wave 模組無法讀取；add_voice.py 可以轉換"})
+                refs.append(entry)
+
+        return {"root": os.path.relpath(root, Path(settings.resolve("."))),
+                "sovits": sovits, "gpt": gpt, "references": refs}
+
+    @app.get("/runtime", summary="執行環境資訊")
+    def runtime() -> dict[str, Any]:
+        """控制台的「環境」區塊。這些是偵測來的，不是設定來的。"""
+        import platform
+
+        import torch
+
+        info: dict[str, Any] = {
+            "python": platform.python_version(),
+            "torch": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_devices": [],
+            "cpu_threads": torch.get_num_threads(),
+            "platform": f"{platform.system()} {platform.machine()}",
+        }
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                props = torch.cuda.get_device_properties(i)
+                info["cuda_devices"].append({
+                    "index": i,
+                    "name": props.name,
+                    "total_memory_gb": round(props.total_memory / 1024**3, 1),
+                    "capability": f"{props.major}.{props.minor}",
+                    # fp16 要 sm 5.3 以上才划算；V100 是 7.0
+                    "fp16_ok": (props.major, props.minor) >= (5, 3),
+                })
+        try:
+            import torchaudio
+
+            info["torchaudio"] = torchaudio.__version__
+        except Exception:  # noqa: BLE001
+            info["torchaudio"] = None
+        return info
+
     # ------------------------------------------------------------ 狀態
 
     @app.get("/health", summary="狀態")
@@ -292,6 +407,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             candidate.models.t2s = req.t2s
         if req.vits is not None:
             candidate.models.vits = req.vits
+        if req.device is not None:
+            candidate.device = req.device
+        if req.is_half is not None:
+            candidate.is_half = req.is_half
         try:
             candidate.validate()
             preflight(candidate)

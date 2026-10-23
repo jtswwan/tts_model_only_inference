@@ -260,6 +260,11 @@ class Engine:
         self.trim_stats: dict[str, Any] = {}
         self.trim_verified = False
         self.quality_notes: list[str] = []
+        self.started_at = time.time()
+        # 控制台要畫的歷史。TTFA 是主要指標，所以每筆都記下來。
+        self.history: deque[dict[str, Any]] = deque(maxlen=200)
+        self.requests_total = 0
+        self.audio_seconds_total = 0.0
 
         self.detected = preflight(settings)
         if self.detected:
@@ -492,14 +497,34 @@ class Engine:
         with self._lock:
             start = time.perf_counter()
             first_at: float | None = None
+            samples = 0
+            sample_rate = 0
             try:
                 for sr, chunk in self._run(inputs):
                     if first_at is None:
                         first_at = time.perf_counter() - start
                         self._ttfa.append(first_at)
+                    sample_rate = sr
+                    samples += len(chunk)
                     yield sr, chunk
             finally:
-                self._total.append(time.perf_counter() - start)
+                elapsed = time.perf_counter() - start
+                self._total.append(elapsed)
+                audio_s = samples / sample_rate if sample_rate else 0.0
+                self.requests_total += 1
+                self.audio_seconds_total += audio_s
+                self.history.append(
+                    {
+                        "at": time.time(),
+                        "chars": len(text),
+                        "ttfa_ms": round((first_at or 0.0) * 1000, 1),
+                        "total_ms": round(elapsed * 1000, 1),
+                        "audio_seconds": round(audio_s, 3),
+                        # 即時倍率 > 1 表示生成快於播放
+                        "realtime_factor": round(audio_s / elapsed, 3) if elapsed else None,
+                        "profile": inputs.get("streaming_mode") and "low" or "quality",
+                    }
+                )
 
     def release(self) -> None:
         """釋放模型佔用的記憶體。
@@ -548,6 +573,10 @@ class Engine:
             "sv_cache": self.sv_cache.stats(),
             "bert_trim": self.trim_stats or None,
             "model_load_seconds": round(self.load_seconds, 2),
+            "uptime_seconds": round(time.time() - self.started_at, 1),
+            "requests_total": self.requests_total,
+            "audio_seconds_total": round(self.audio_seconds_total, 2),
+            "history": list(self.history),
         }
 
     def status(self) -> dict[str, Any]:
@@ -564,6 +593,8 @@ class Engine:
             "latency_profile": s.latency.profile,
             "text_split_method": s.latency.text_split_method,
             "reference_audio": s.reference.audio,
+            "reference_text": s.reference.text,
+            "reference_lang": s.reference.lang,
             "text_lang": s.text_lang,
             # 音質狀態。clean 為 true 表示所有會影響輸出的設定都與 upstream
             # 預設一致，且 BERT 剪裁已通過逐位元等價自檢。
