@@ -566,8 +566,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001
             log.exception("寫入自訂發音失敗")
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+        # 中文的 key 會被正規化成簡體（管線裡 text_normalize 做繁簡轉換），
+        # 所以要回報實際存進去的是哪個詞 —— 使用者打繁體時才不會以為沒生效。
+        stored = pronunciation.normalize_word(req.lang, req.word)
         return {
             "entries": entries,
+            "stored_key": stored,
+            "normalized": stored != req.word.strip(),
             "lookup": pronunciation.lookup(req.word, entries),
         }
 

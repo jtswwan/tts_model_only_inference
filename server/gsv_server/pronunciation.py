@@ -114,6 +114,37 @@ def parse(text: str, source: str = "<string>") -> dict[str, dict[str, list[str]]
     return entries
 
 
+# ---- 正規化 ----
+
+
+def normalize_word(lang: str, word: str) -> str:
+    """把使用者輸入的詞轉成 upstream 實際會查字典的形式。
+
+    中文管線在 `clean_text` 裡先跑 `chinese2.text_normalize()`，那會做繁簡
+    轉換（實測 `檔案` -> `档案`），之後才由 jieba 斷詞、`correct_pronunciation()`
+    拿著**簡體**的詞去查 `pp_dict`。
+
+    所以字典的 key 必須是簡體。使用者打繁體卻存成繁體的話，key 永遠對不上，
+    改了完全沒反應而且沒有任何錯誤 —— 正是本專案要避免的無聲失敗。
+    """
+    word = word.strip()
+    if lang != "zh":
+        return word.lower()
+    try:
+        bootstrap.require_setup()
+        from text.chinese2 import text_normalize
+
+        normed = "".join(
+            ch for ch in text_normalize(word) if not ch.isspace()
+        ).strip("".join(PUNCT_STRIP))
+        return normed or word
+    except Exception:  # noqa: BLE001
+        return word
+
+
+PUNCT_STRIP = "，。！？；：、,.!?;:"
+
+
 # ---- 驗證 ----
 
 
@@ -238,7 +269,7 @@ def restore(lang: str, word: str) -> bool:
     """把某個詞還原成 upstream 原本的值，不必重啟。"""
     if lang not in LANGS:
         raise PronunciationError(f"不認識的語言 {lang!r}")
-    word = word if lang == "zh" else word.lower()
+    word = normalize_word(lang, word)
     original = _originals.get(lang, {}).pop(word, _MISSING)
     target = _target_dicts()[lang]
     if original is _MISSING:
@@ -279,7 +310,7 @@ def upsert(lang: str, word: str, value: list[str],
     if not value:
         raise PronunciationError("發音不能是空的")
     entries = load(path)
-    key = word.strip() if lang == "zh" else word.strip().lower()
+    key = normalize_word(lang, word)
     if not key:
         raise PronunciationError("詞不能是空的")
     entries[lang][key] = list(value)
@@ -293,7 +324,7 @@ def remove(lang: str, word: str, path: Path | None = None) -> dict[str, dict[str
     if lang not in LANGS:
         raise PronunciationError(f"不認識的語言 {lang!r}")
     entries = load(path)
-    key = word.strip() if lang == "zh" else word.strip().lower()
+    key = normalize_word(lang, word)
     if key not in entries[lang]:
         raise PronunciationError(f"[{lang}] 裡沒有 {key!r}")
     del entries[lang][key]
