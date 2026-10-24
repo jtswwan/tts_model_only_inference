@@ -163,3 +163,79 @@ def lookup_any(word: str) -> tuple[str, list[list[str]]] | None:
             return word, tone3
     simp = simplified_index()
     return simp.get(word) if simp else None
+
+
+# ---- 台灣讀音模式 ----
+#
+# 為什麼需要這個：把管線改成繁體**不會**解決讀音問題。實測 8 個台／陸讀音
+# 不同的詞，繁體直接餵給 g2pw 與轉簡體後的拼音**完全相同**，而且仍是大陸
+# 讀音。差異在 g2pw 的訓練資料（它學的是大陸讀音標準），不在字體編碼。
+# `垃圾` 繁簡寫法一樣，它照樣唸 la1 ji1。
+#
+# 真正的解法是換掉查表的內容：把教育部的讀音整個覆蓋上 `pp_dict`。
+# `correct_pronunciation()`（g2pw.py:147）第一步就是查這張表，查得到就不會
+# 用模型猜的結果。
+#
+# 優先順序：使用者的 pronunciation.rep > 教育部 > upstream 的大陸讀音。
+
+_overlay_applied = False
+_overlay_saved: dict[str, object] = {}
+
+_MISSING = object()
+
+
+def apply_overlay(skip: set[str] | None = None) -> int:
+    """把教育部讀音覆蓋到 `g2pw.pp_dict`。回傳覆蓋的筆數。
+
+    `skip` 裡的詞不碰 —— 那是使用者自己設定的，優先權最高。
+
+    異讀只取第一個。教育部標準有些台灣口語不這樣唸（`說服 shui4 fu2`、
+    `滑稽 gu3 ji1`），覺得怪就在控制台把那個詞設成你要的，使用者設定會贏。
+    """
+    global _overlay_applied
+    simp = simplified_index()
+    if not simp:
+        return 0
+    bootstrap.require_setup()
+    from text.g2pw import g2pw as g2pw_mod
+
+    skip = skip or set()
+    pp = g2pw_mod.pp_dict
+    count = 0
+    for word, (_trad, readings) in simp.items():
+        if word in skip:
+            continue
+        value = list(readings[0])
+        if pp.get(word) == value:
+            continue
+        if word not in _overlay_saved:
+            _overlay_saved[word] = pp.get(word, _MISSING)
+        pp[word] = value
+        count += 1
+    _overlay_applied = True
+    log.info("台灣讀音模式：覆蓋 %d 筆（教育部）", count)
+    return count
+
+
+def remove_overlay() -> int:
+    """還原成 upstream 原本的大陸讀音。"""
+    global _overlay_applied
+    if not _overlay_applied:
+        return 0
+    bootstrap.require_setup()
+    from text.g2pw import g2pw as g2pw_mod
+
+    pp = g2pw_mod.pp_dict
+    for word, original in _overlay_saved.items():
+        if original is _MISSING:
+            pp.pop(word, None)
+        else:
+            pp[word] = original  # type: ignore[assignment]
+    n = len(_overlay_saved)
+    _overlay_saved.clear()
+    _overlay_applied = False
+    return n
+
+
+def overlay_active() -> bool:
+    return _overlay_applied

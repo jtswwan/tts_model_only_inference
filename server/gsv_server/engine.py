@@ -25,6 +25,7 @@ bootstrap.setup()
 
 from . import bert_trim  # noqa: E402
 from . import gaptrim  # noqa: E402
+from . import moedict  # noqa: E402
 from . import zh_context  # noqa: E402
 from . import pronunciation  # noqa: E402
 from .settings import Settings  # noqa: E402
@@ -386,6 +387,7 @@ class Engine:
         # preflight() 已經讀過並驗證過了，這裡沿用同一份，不重讀檔案
         self.custom_pronunciations: dict[str, dict[str, list[str]]] = {}
         self.pronunciation_counts: dict[str, int] = {}
+        self.taiwan_readings = 0
 
         self.detected = preflight(settings)
         if self.detected:
@@ -457,6 +459,13 @@ class Engine:
                 "latency.profile=low：啟用 streaming_mode，upstream 在 "
                 "TTS.py:1027 自評為 Medium quality，且會強制 parallel_infer=False "
                 "使 AR 改走 infer_panel_naive（另一條程式碼路徑）"
+            )
+        if lat.zh_taiwan_readings:
+            notes.append(
+                "latency.zh_taiwan_readings=true：中文讀音改用教育部《重編國語辭典"
+                "修訂本》，覆蓋 upstream polyphonic.rep 的大陸讀音。"
+                "注意教育部標準有些台灣口語不這樣唸（說服 shui4 fu2、滑稽 gu3 ji1），"
+                "個別詞可在控制台改掉（使用者設定優先）"
             )
         if lat.zh_full_sentence_bert:
             notes.append(
@@ -590,6 +599,22 @@ class Engine:
             pronunciation.install_drop_recorder()
         except Exception as exc:  # noqa: BLE001
             log.warning("音素丟失記錄器安裝失敗：%s", exc)
+
+        # 台灣讀音模式要在使用者的自訂發音「之前」套用 —— 後套的會贏，
+        # 所以使用者的設定優先權最高。
+        if self.settings.latency.zh_taiwan_readings:
+            try:
+                if not moedict.available():
+                    log.warning(
+                        "zh_taiwan_readings=true 但找不到教育部辭典（%s）。"
+                        " 先跑 %s。這次用 upstream 的大陸讀音。",
+                        moedict.DATA, moedict.DOWNLOAD_HINT,
+                    )
+                else:
+                    skip = set(self.custom_pronunciations.get("zh", {}))
+                    self.taiwan_readings = moedict.apply_overlay(skip)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("台灣讀音模式套用失敗：%s", exc)
 
         if not self.custom_pronunciations:
             return
@@ -803,6 +828,7 @@ class Engine:
             "warm": self.warm,
             "english_ready": english_frontend_ready(),
             "custom_pronunciations": pronunciation.flatten(self.custom_pronunciations),
+            "taiwan_readings": self.taiwan_readings,
             "version": self.config.version,
             "device": str(self.config.device),
             "is_half": self.config.is_half,

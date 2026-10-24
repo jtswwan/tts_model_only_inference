@@ -63,6 +63,12 @@ latency:
   # 所以會列在 /health 的 quality.deviations 裡。
   max_language_gap_ms: 0
 
+  # 台灣讀音模式：中文讀音改用教育部《重編國語辭典修訂本》，
+  # 覆蓋 upstream polyphonic.rep 的大陸讀音（實測覆蓋 128,912 筆、暖機 +15 秒）。
+  # 需要先跑 scripts/tw_check.py --download 把辭典抓下來。
+  # 優先順序：pronunciation.rep > 教育部 > upstream。
+  zh_taiwan_readings: true
+
   # 僅 profile=low 時生效
   overlap_length: 2
   min_chunk_length: 16

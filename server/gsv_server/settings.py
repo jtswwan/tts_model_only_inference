@@ -110,6 +110,15 @@ class Latency:
     # 開啟時列在 /health 的 quality.deviations。
     zh_full_sentence_bert: bool = False
 
+    # 台灣讀音模式：把教育部《重編國語辭典修訂本》的讀音整個覆蓋到
+    # g2pw 的 pp_dict 上。需要先跑 scripts/tw_check.py --download。
+    #
+    # 為什麼不是「把管線改成繁體」：實測繁體直接餵給 g2pw 與轉簡體後的拼音
+    # 完全相同，而且仍是大陸讀音 —— 差異在 g2pw 的訓練資料，不在字體編碼。
+    #
+    # 優先順序：pronunciation.rep > 教育部 > upstream 的大陸讀音。
+    zh_taiwan_readings: bool = False
+
     trim_bert: bool = True
     warmup_dummy_run: bool = True
     warmup_english_frontend: bool = True
