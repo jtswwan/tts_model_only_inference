@@ -59,16 +59,78 @@ else:
     print("  沒有 GPU 也能跑完，但達不到實時。")
 """),
 
-    md("## 2. 取得程式碼"),
+    md("""
+## 2. 取得程式碼
+
+**這個 repo 目前是 private**，所以 Colab 的 `git clone` 需要認證 —— 不然會看到
+`could not read Username for 'https://github.com'`。
+
+兩種做法，選一個：
+
+**A. 用 token（repo 維持 private）**
+1. GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens**
+2. 新增一個，Repository access 選這個 repo，權限給 **Contents: Read-only**
+3. 回到 Colab，左邊欄的 🔑（Secrets）→ 新增名稱 **`GITHUB_TOKEN`**，值貼上 token，
+   並把「Notebook access」打開
+
+**B. 把 repo 改成 public**
+GitHub → repo 的 Settings → 最下面 Danger Zone → Change visibility → Public。
+之後這格不用 token 就能跑。
+
+下面會自動判斷：有 token 用 token，沒有就試匿名；**都不行會直接停下來並說明原因**，
+不會像之前那樣繼續跑到下一格才爆 `FileNotFoundError`。
+"""),
     code(f"""
-import os, pathlib
+import os, pathlib, shutil, subprocess
+
+REPO = "{REPO_URL}"
+BRANCH = "{BRANCH}"
 REPO_DIR = pathlib.Path("/content/tts_model_only_inference")
-if not REPO_DIR.exists():
-    !git clone --depth 1 -b {BRANCH} {REPO_URL} {{REPO_DIR}}
+
+# Colab Secrets 裡的 GITHUB_TOKEN（有才用）
+token = None
+try:
+    from google.colab import userdata
+    token = userdata.get("GITHUB_TOKEN")
+except Exception:
+    pass
+
+def clone(url, label):
+    # 不要把 token 印出來
+    safe = url.replace(token, "***") if token else url
+    print(f"嘗試 {{label}}: {{safe}}")
+    r = subprocess.run(["git", "clone", "--depth", "1", "-b", BRANCH, url, str(REPO_DIR)],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        return True
+    err = (r.stderr or "").replace(token, "***") if token else (r.stderr or "")
+    print("  失敗:", err.strip().splitlines()[-1][:160] if err.strip() else "(無訊息)")
+    shutil.rmtree(REPO_DIR, ignore_errors=True)
+    return False
+
+if (REPO_DIR / ".git").is_dir():
+    print("已存在，跳過 clone")
 else:
-    print("已存在，跳過")
+    shutil.rmtree(REPO_DIR, ignore_errors=True)
+    ok = False
+    if token:
+        ok = clone(REPO.replace("https://", f"https://{{token}}@"), "用 GITHUB_TOKEN")
+    if not ok:
+        ok = clone(REPO, "匿名（repo 要是 public）")
+    if not ok:
+        print()
+        print("取不到程式碼。這個 repo 是 private，請二選一：")
+        print("  A. 在 Colab 左邊欄的 Secrets（🔑）加一個 GITHUB_TOKEN，")
+        print("     用 fine-grained token、Contents: Read-only，並開啟 Notebook access")
+        print("  B. 把 repo 改成 public：GitHub repo Settings -> Danger Zone")
+        print("     -> Change visibility -> Public")
+        print("改好之後重跑這一格。")
+        raise SystemExit(1)
+
 os.chdir(REPO_DIR)
 print("工作目錄:", os.getcwd())
+print("分支:", subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                              capture_output=True, text=True).stdout.strip())
 """),
 
     md("""
