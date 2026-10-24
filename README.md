@@ -956,6 +956,34 @@ python3 scripts/check_en.py wav gpu api      # 逐字母拼讀的會被標出來
 python3 scripts/check_en.py --no-custom wav  # 看 upstream 原本的結果
 ```
 
+#### 整個中文前端是「普通話」的
+
+這不是某個詞唸錯，是結構性的：
+
+- `g2pw` 用大陸語料訓練
+- `text/g2pw/polyphonic.rep` 的 **45,046 筆**是大陸讀音
+- `chinese2.text_normalize()` 會把繁體轉成簡體
+
+所以台／陸讀音不同的詞，一律以大陸讀音輸出。`scripts/tw_check.py` 拿教育部《重編國語辭典修訂本》逐詞比對：
+
+```bash
+python3 scripts/tw_check.py --download              # 抓辭典（14 MB，只抓一次）
+python3 scripts/tw_check.py --text "你的稿子"        # 從稿子抓詞來比對 ← 建議這樣用
+python3 scripts/tw_check.py --diff-only 垃圾 企業     # 只列不一樣的
+python3 scripts/tw_check.py --apply --diff-only 垃圾  # 直接寫進字典
+python3 scripts/tw_check.py --scan-upstream         # 把 45,046 筆整個掃一遍
+```
+
+**實測 `--scan-upstream`：2,703 筆與教育部不同。但不要全部套用** —— 教育部標準有些台灣口語根本不這樣唸（`說服 shui4 fu2`、`滑稽 gu3 ji1`、`口吃 kou3 ji2`），照單全收會更怪。建議的流程是**合成前先對稿子跑一次 `--text`**，只處理實際會用到的詞。
+
+這支工具存在的理由很實際：這份字典最早幾筆是我憑記憶加的，`檔案` 加成四聲（台灣是三聲）、`法國`／`俄羅斯`／`液體`／`包括` 四個也錯，而那四個 g2pw 本來就是對的。接上辭典之後這些全部當場被抓出來。**憑印象改發音會出錯，查辭典不會。**
+
+##### 辭典的授權
+
+教育部《重編國語辭典修訂本》，JSON 轉換出自 [g0v 萌典](https://github.com/g0v/moedict-data)，採 **CC BY-ND 3.0 TW**：可原封不動重製散布、可商用，但**不得改作**（含節錄重組）。
+
+所以本專案：**不修改那個檔案，也不從它產生任何衍生資料檔**，只在執行時載入記憶體查詢。`moedict/來源與授權.md` 有完整標示。你寫進 `server/pronunciation.rep` 的是你自己對系統的設定，不是辭典的衍生著作。
+
 #### 三個會讓人白忙的坑，都在介面上標出來了
 
 **1. 整詞條目會遮蔽單字條目。** `correct_pronunciation()`（`g2pw.py:147-156`）**先查整詞，查到就直接回傳**，查不到才逐字 fallback。`pp_dict` 有 **45,046** 筆，所以這很常發生：實測把 `行` 設成 `hang2` 對 `這一行字` 完全沒反應，因為 `一行` 本身就在字典裡。控制台會把這種詞標成「整詞條目」並說明要改整個詞。
@@ -1285,6 +1313,7 @@ preflight 把這兩種情況都變成 **HTTP 400**，並附上可行動的訊息
 start.sh / start.bat      一鍵啟動（雙擊即可）
 requirements.txt          由 import 圖掃出，非從 upstream 抄改
 Colab.ipynb               產生物 —— 要改請改 scripts/make_colab.py
+moedict/                  教育部辭典（原封不動，CC BY-ND，不進 git）
 nltk_data/                英文前端的 nltk 語料（下載而來，不進 git）
 
 server/
@@ -1317,6 +1346,7 @@ scripts/
   make_colab.py           產生 Colab.ipynb（寫出前會先編譯每個 code cell）
   make_fp16.py            產生 fp16 的 BERT 並逐位元驗證（GPU 用，省 582 MB）
   backup.py               備份／還原設定、自訂發音與自訂語音
+  tw_check.py             拿教育部辭典比對台灣讀音（離線，不改辭典原檔）
   verify_equivalence.py   實測等價優化是否真的等價（需 GPU）
   bench.py                量 TTFA（只用標準庫）
   check_en.py             查某個英文詞實際會被唸成什麼音素

@@ -164,13 +164,39 @@ def _validate_en(words: dict[str, list[str]], source: str) -> list[str]:
     return problems
 
 
+def _zh_pinyin_key(initial: str, final_with_tone: str) -> tuple[str, str] | None:
+    """照抄 `chinese2.py:244-289` 把 (聲母, 帶調韻母) 轉成 pinyin_to_symbol_map 的鍵。
+
+    不能只拿 `to_finals_tone3()` 的結果去比對 symbols2 —— upstream 中間還有
+    兩層改寫，少做就會把合法的拼音誤判成錯的（實測 `niu2` 的 strict 韻母是
+    `iou2`，不在 symbols2 裡，但 upstream 會先改寫成 `iu` 才查表）。
+    """
+    v_without_tone = final_with_tone[:-1]
+    tone = final_with_tone[-1:]
+    if tone not in "12345":
+        return None
+    pinyin = initial + v_without_tone
+    if initial:
+        v_rep_map = {"uei": "ui", "iou": "iu", "uen": "un"}
+        if v_without_tone in v_rep_map:
+            pinyin = initial + v_rep_map[v_without_tone]
+    else:
+        pinyin_rep_map = {"ing": "ying", "i": "yi", "in": "yin", "u": "wu"}
+        if pinyin in pinyin_rep_map:
+            pinyin = pinyin_rep_map[pinyin]
+        else:
+            single_rep_map = {"v": "yu", "e": "e", "i": "y", "u": "w"}
+            if pinyin[:1] in single_rep_map:
+                pinyin = single_rep_map[pinyin[0]] + pinyin[1:]
+    return pinyin, tone
+
+
 def _validate_zh(words: dict[str, list[str]], source: str) -> list[str]:
     bootstrap.require_setup()
     from pypinyin.contrib.tone_convert import to_finals_tone3, to_initials
 
-    from text.symbols2 import symbols
+    from text.chinese2 import pinyin_to_symbol_map
 
-    known = set(symbols)
     problems = []
     for word, pinyins in words.items():
         chars = [c for c in word if not c.isspace()]
@@ -181,18 +207,30 @@ def _validate_zh(words: dict[str, list[str]], source: str) -> list[str]:
             )
             continue
         for py in pinyins:
+            # 沒標聲調的話 to_finals_tone3 會自己補輕聲（"ce" -> "e5"），
+            # 使用者多半不是那個意思。寧可明確要求，不要悄悄換一個讀音。
+            if py[-1:] not in "12345":
+                problems.append(
+                    f"[zh] {word}: 拼音 {py!r} 沒有聲調。要在後面加 1-5"
+                    f"（例如 {py}1；5 是輕聲）。"
+                )
+                continue
             try:
                 initial = to_initials(py)
                 final = to_finals_tone3(py, neutral_tone_with_five=True)
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"[zh] {word}: 拼音 {py!r} 無法解析（{exc}）")
                 continue
-            bad = [x for x in (initial, final) if x and x not in known]
             if not final:
                 problems.append(f"[zh] {word}: 拼音 {py!r} 解不出韻母，應該是打錯了")
-            elif bad:
+                continue
+            key = _zh_pinyin_key(initial, final)
+            if key is None:
+                problems.append(f"[zh] {word}: 拼音 {py!r} 缺聲調（要 1-5）")
+            elif key[0] not in pinyin_to_symbol_map:
                 problems.append(
-                    f"[zh] {word}: 拼音 {py!r} 轉出 symbols2 不認識的 {' '.join(bad)}"
+                    f"[zh] {word}: 拼音 {py!r} 不是合法的音節"
+                    f"（chinese2.py:289 會在 {key[0]!r} 這裡 assert 失敗）"
                 )
     return problems
 
