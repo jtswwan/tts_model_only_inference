@@ -182,8 +182,8 @@ server 會警告並沿用大陸讀音**（`垃圾` 唸 lājī 而不是 lèsè�
     code("""
 !python3 scripts/tw_check.py --download
 
-# 比對幾個台／陸讀音不同的詞，確認辭典可用
-!python3 scripts/tw_check.py --diff-only 垃圾 研究 危險 品質 資料 結果
+# 看看這個模式實際在修什麼：比對 upstream 的 45,046 筆大陸讀音與教育部
+!python3 scripts/tw_check.py --scan-upstream --limit 12
 """),
 
     md("""
