@@ -148,6 +148,31 @@ CPU 版實測 **4.91 GB**（Python 與套件 2.04 GB + 程式碼與權重 2.87 G
 | 用的直譯器 | bundle 自帶的 Python 3.11.15 / torch 2.8.0+cpu |
 | console script | `pip` / `isympy` / `ttx` 搬家後仍可執行 |
 
+### 備份：哪些東西重做不回來
+
+repo 裡有三種檔案，只有第三種是你的：
+
+| | 怎麼來的 | 丟了怎麼辦 |
+|---|---|---|
+| vendored 的 upstream 程式碼 | `vendor_upstream.sh` | 重跑就有 |
+| 權重（約 2.85 GB）、nltk 語料 | `fetch_models.sh` | 重抓就有 |
+| **設定、自訂發音、`add_voice.py` 裝的語音** | 你做出來的 | **沒了就是沒了** |
+
+第 3 類全部被 `.gitignore` 擋在版控之外（權重太大、設定是本機的），所以不備份就是真的沒了。
+
+```bash
+python3 scripts/backup.py export                 # 產生 gsv-backup-<日期>.tar.gz
+python3 scripts/backup.py export --with-voices   # 連自訂模型與參考音訊一起收
+python3 scripts/backup.py list    <檔案>         # 看裡面有什麼，不解開
+python3 scripts/backup.py restore <檔案>         # 還原（既有檔案先存成 .bak）
+```
+
+預設只收小檔案（`config.yaml` + `pronunciation.rep` + 一份清單），**不**收權重 —— 那些重抓就有。清單會記下 config 當時指到哪些模型檔，還原到新機器時照著補即可；有自訂語音沒被收進來時會明確提醒。
+
+還原時不信任壓縮檔裡的路徑：指向 repo 之外的一律拒絕。
+
+**Colab 上一定要備份** —— VM 關掉就什麼都沒了，notebook 第 9 節會打包並直接下載到你電腦。
+
 ### 需要多少空間
 
 | 項目 | 大小 | 說明 |
@@ -1028,11 +1053,12 @@ else:
 | | `wav` 前的停頓 | 另一處 | 總長 |
 |---|---|---|---|
 | upstream 原樣 | **420 ms** | 200 ms | 4.46 s |
-| 上限 120 ms | 120 ms | 100 ms | 3.95 s |
-| **上限 60 ms（預設）** | 60 ms | 40 ms | 3.83 s |
-| 上限 30 ms | 幾乎無縫 | — | 3.73 s |
+| 上限 120 ms（對稱消） | 120 ms | 100 ms | 3.95 s |
+| 上限 60 ms（只消 zh→en） | 60 ms | 200 ms 保留 | 4.06 s |
 
-420 ms 的死寂出現在一句**完全沒有標點**的話中間，那是模型在語言邊界猶豫產生的。預設取 60 ms —— 連續語句裡的詞間停頓本來就接近 0，120 ms 仍然聽得出來。
+420 ms 的死寂出現在一句**完全沒有標點**的話中間，那是模型在語言邊界猶豫產生的。
+
+**但實際聽下來，剪掉停頓反而更不自然，所以預設關閉（`max_language_gap_ms: 0`）。** 程式碼留著，要用的話改設定即可。真正讓中英混雜變難聽的是下面那件事（BERT 被切碎），不是停頓本身 —— 剪停頓只是在處理症狀。
 
 **只消「中文接英文」的停頓，「英文接中文」的保留。** 中文講到一半切進英文時那個停頓是模型在猶豫，不該有；但講完一個英文詞再回到中文，稍微頓一下是自然的。實測那句話的邊界是 `zh2en, en2zh, zh2en, en2zh, zh2en, en2zh`，處理後 `wav` 前面的 420 ms 被消成 60 ms，第二個 200 ms（`en2zh`）原樣保留。
 
@@ -1290,6 +1316,7 @@ scripts/
   fetch_models.sh         下載權重（只抓 PyTorch 格式）與英文 nltk 語料
   make_colab.py           產生 Colab.ipynb（寫出前會先編譯每個 code cell）
   make_fp16.py            產生 fp16 的 BERT 並逐位元驗證（GPU 用，省 582 MB）
+  backup.py               備份／還原設定、自訂發音與自訂語音
   verify_equivalence.py   實測等價優化是否真的等價（需 GPU）
   bench.py                量 TTFA（只用標準庫）
   check_en.py             查某個英文詞實際會被唸成什麼音素

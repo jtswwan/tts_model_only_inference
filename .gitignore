@@ -27,6 +27,10 @@ output/
 hdr*.txt
 samples/
 
+# 備份檔（scripts/backup.py 產生）與還原時留下的副本
+gsv-backup-*.tar.gz
+*.bak
+
 # nltk 語料（約 20 MB，由 scripts/fetch_models.sh 下載）
 nltk_data
 nltk_data/

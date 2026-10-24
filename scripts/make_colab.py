@@ -313,7 +313,95 @@ for label, text, ttfa, total, secs, pcm, sr in rows:
 """),
 
     md("""
-## 8. 換模型 / 換參考音訊（選用）
+## 8. 發音字典：遇到唸錯的字就改掉
+
+兩種常見的唸錯：
+
+- **英文**：`text/english.py:322` 對「不在 cmudict 裡、長度 ≤ 3」的詞一律**逐字母拼讀**。
+  `GPU`→G-P-U 是對的，但 `wav` 會變成 "double-u ay vee"。
+- **中文**：g2pw 整句推理，遇到人名與專有名詞會猜錯聲調（例如 `檔案` 被唸成 dǎng）。
+
+下面先查這段文字每個詞實際會怎麼唸，再直接改。**改完立刻生效，不用重啟。**
+
+控制台（上一格那個網頁）也有同樣的「發音字典」介面，用滑鼠點比較快。
+"""),
+    code("""
+import json, urllib.request
+
+PORT = globals().get("PORT", 8000)
+
+def api(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(f"http://127.0.0.1:{PORT}{path}", data=data,
+                                 method=method, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return json.loads(r.read())
+
+TEXT = "我把檔案存成 wav 然後上傳到 server"
+
+for it in api("POST", "/dict/lookup", {"text": TEXT})["items"]:
+    cur = " ".join(it.get("pinyin") or it.get("phones") or [])
+    tag = ""
+    if it["custom"]:
+        tag = "← 自訂"
+    elif it.get("letter_by_letter"):
+        tag = "← 逐字母拼讀，多半是錯的"
+    elif it.get("shadows_single_chars"):
+        tag = "（整詞條目，改單字不會有反應）"
+    print(f'{it["lang"]:3s} {it["word"]:10s} {cur:28s} {tag}')
+"""),
+    md("""
+改一個詞試試看。英文給 ARPAbet 音素（`W EY1 V`），中文給拼音（`dang4 an4`）。
+打錯會回 400 並指名是哪個音素 —— 不會默默把音丟掉。
+
+中文的 key 會自動轉成簡體（管線裡本來就會做繁簡轉換），所以打繁體也沒關係。
+"""),
+    code("""
+# 英文：wav 當一個字唸，而不是 W-A-V
+print(api("PUT", "/dict", {"lang": "en", "word": "wav", "value": ["W", "EY1", "V"]})["entries"]["en"])
+
+# 中文：檔案 的 檔 是四聲
+r = api("PUT", "/dict", {"lang": "zh", "word": "檔案", "value": ["dang4", "an4"]})
+print("存成的 key:", r["stored_key"], "（繁體已轉簡體）" if r["normalized"] else "")
+
+# 改完再查一次
+for it in api("POST", "/dict/lookup", {"text": TEXT})["items"]:
+    if it["custom"]:
+        print("已套用:", it["word"], " ".join(it.get("pinyin") or it.get("phones")))
+
+# 要還原成 upstream 原本的讀音：
+# api("DELETE", "/dict?lang=zh&word=" + urllib.parse.quote("檔案"))
+"""),
+
+    md("""
+## 9. 備份（**Colab 關掉就什麼都沒了，這格要跑**）
+
+Colab 的 VM 是暫時的。權重與程式碼隨時能重抓，但**你改的設定與自訂發音重做不回來**。
+
+下面會打包 `server/config.yaml` 與 `server/pronunciation.rep`，然後直接下載到你電腦。
+下次重開 Colab，把檔案上傳回來跑 `restore` 就回到原狀。
+"""),
+    code("""
+!python3 scripts/backup.py export --out /content/gsv-backup.tar.gz
+
+from google.colab import files
+files.download("/content/gsv-backup.tar.gz")
+"""),
+    md("""
+下次要還原（先把備份檔上傳到 `/content/`）：
+
+```python
+from google.colab import files
+up = files.upload()                      # 選你的 gsv-backup.tar.gz
+!python3 scripts/backup.py list    /content/gsv-backup.tar.gz
+!python3 scripts/backup.py restore /content/gsv-backup.tar.gz
+```
+
+還原後要重跑「啟動 server」那一格才會生效。
+"""),
+
+    md("""
+## 10. 換模型 / 換參考音訊（選用）
 
 上傳自己的權重後，用 `add_voice.py` 檢查並安裝。它會從**檔頭**判定版本、
 核對 GPT 與 SoVITS 的符號集、檢查參考音訊長度是否在 3–10 秒內。
@@ -332,7 +420,7 @@ for label, text, ttfa, total, secs, pcm, sr in rows:
 """),
 
     md("""
-## 9. 停止
+## 11. 停止
 
 Colab 的執行階段結束時 server 會自動結束，通常不需要手動停。
 """),
