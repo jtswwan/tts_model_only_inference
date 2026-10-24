@@ -189,8 +189,16 @@ def apply_overlay(skip: set[str] | None = None) -> int:
 
     `skip` 裡的詞不碰 —— 那是使用者自己設定的，優先權最高。
 
-    異讀只取第一個。教育部標準有些台灣口語不這樣唸（`說服 shui4 fu2`、
-    `滑稽 gu3 ji1`），覺得怪就在控制台把那個詞設成你要的，使用者設定會贏。
+    **只覆蓋單一讀音的詞。** 辭典裡有 2,291 筆是多音字（`期` 有
+    `ji1 / qi1 / qi2`、`要` 有 `yao1 / yao4`），無條件取第一個會出事 ——
+    實測 `星期一` 被唸成 `xing1 ji1 yi1`（取到 `期` 的古音 `ji1`）。
+
+    多音字的消歧本來就是 g2pw 的工作，它會看上下文；用一個靜態的「第一個
+    讀音」蓋掉，等於把它最擅長的事拆掉。所以那 2,291 筆原樣留給 g2pw，
+    真的唸錯再用控制台逐詞改。
+
+    教育部標準有些台灣口語不這樣唸（`說服 shui4 fu2`、`滑稽 gu3 ji1`），
+    覺得怪就在控制台把那個詞設成你要的，使用者設定會贏。
     """
     global _overlay_applied
     simp = simplified_index()
@@ -202,8 +210,13 @@ def apply_overlay(skip: set[str] | None = None) -> int:
     skip = skip or set()
     pp = g2pw_mod.pp_dict
     count = 0
+    skipped_polyphonic = 0
     for word, (_trad, readings) in simp.items():
         if word in skip:
+            continue
+        if len(readings) > 1:
+            # 多音字留給 g2pw 看上下文判斷
+            skipped_polyphonic += 1
             continue
         value = list(readings[0])
         if pp.get(word) == value:
@@ -213,7 +226,8 @@ def apply_overlay(skip: set[str] | None = None) -> int:
         pp[word] = value
         count += 1
     _overlay_applied = True
-    log.info("台灣讀音模式：覆蓋 %d 筆（教育部）", count)
+    log.info("台灣讀音模式：覆蓋 %d 筆（教育部）；%d 筆多音字留給 g2pw 判斷",
+             count, skipped_polyphonic)
     return count
 
 
