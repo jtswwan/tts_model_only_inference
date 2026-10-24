@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import pronunciation, wavio
+from . import moedict, pronunciation, wavio
 from .engine import Engine, PreflightError, preflight
 from .settings import ALLOWED_LANGS, Settings, load
 
@@ -549,10 +549,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/dict/lookup", summary="查一段文字現在實際會怎麼唸")
     def dict_lookup(req: LookupRequest) -> dict[str, Any]:
         try:
-            return pronunciation.lookup(req.text)
+            result = pronunciation.lookup(req.text)
         except Exception as exc:  # noqa: BLE001
             log.exception("查詢發音失敗")
             raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}") from exc
+
+        # 教育部讀音。辭典是惰性載入的（14 MB、約 6 秒），沒下載就只是沒有
+        # 這一欄，不影響其他功能。
+        result["moedict_available"] = moedict.available()
+        result["moedict_hint"] = moedict.DOWNLOAD_HINT
+        if moedict.available():
+            for it in result["items"]:
+                if it["lang"] != "zh":
+                    continue
+                try:
+                    hit = moedict.lookup_any(it["word"])
+                except Exception:  # noqa: BLE001
+                    log.exception("查教育部辭典失敗")
+                    hit = None
+                if hit:
+                    trad, readings = hit
+                    it["moe"] = readings
+                    it["moe_word"] = trad
+                    cur = it.get("pinyin") or []
+                    it["moe_differs"] = not any(list(r) == list(cur) for r in readings)
+        return result
 
     @app.put("/dict", summary="新增或修改一筆自訂發音（立刻生效，不必重啟）")
     def dict_put(req: DictRequest) -> dict[str, Any]:

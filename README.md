@@ -933,6 +933,29 @@ if len(word) <= 3:
 | 覆寫對象 | `_g2p.cmu[word]` | `g2pw.pp_dict[word]` |
 | 單位 | ARPAbet 音素 | 拼音（帶聲調數字） |
 
+**控制台的「發音字典」卡現在一次顯示三種讀音，每個詞三種處理方式：**
+
+| 欄位 | 意思 |
+|---|---|
+| 現在 | 這個 server 目前實際會唸的 |
+| 原本（upstream） | 把自訂發音拿掉之後會唸的 —— 看得到自己改了什麼 |
+| 教育部 | 《重編國語辭典修訂本》怎麼標；和現在不同會標紅 |
+
+| 按鈕 | 做什麼 |
+|---|---|
+| **用教育部** | 直接採用辭典的讀音，寫進 `server/pronunciation.rep` |
+| **存自訂** | 用你在輸入框打的值 |
+| **還原** | 刪掉自訂，回到 upstream 原本的讀音 |
+
+三個都是**寫檔 + 立刻生效**，不用重啟、不用每次重來。
+
+**為什麼不直接改 upstream 的 `polyphonic.rep`** —— 那樣反而會「每次遇到每次都要修」：
+
+1. `vendor_upstream.sh` 會依 `manifest.txt` 重新複製，手改會被蓋掉。
+2. `g2pw/g2pw.py:117-125` 的 `get_dict()` 讀到 `polyphonic.pickle` 就直接回傳，**不會**再讀 `.rep`。所以 pickle 存在時改 `.rep` 根本沒反應（英文的 `get_dict()` 有 `hot_reload_hot()`，中文沒有）。
+
+`server/pronunciation.rep` 在 vendored 樹之外、每次啟動都套用、`backup.py` 會備份，才是真正永久的那個。
+
 **怎麼修**：控制台的「發音字典」卡，輸入一段文字 → 每個詞列出現在的讀音 → 直接改 → **存檔立刻生效，不用重啟**。也可以直接改 `server/pronunciation.rep`：
 
 ```
@@ -1327,6 +1350,7 @@ server/
     bert_trim.py          BERT 等價剪裁
     pronunciation.py      自訂中英發音：載入、驗證、套用、查詢、音素丟失記錄
     gaptrim.py            中英切換處多餘停頓的上限器（串流安全，不影響 TTFA）
+    moedict.py            教育部辭典查詢（惰性載入，不改辭典原檔）
     zh_context.py         讓中英混雜時中文的 BERT 看得到整句
     engine.py             暖機、快取、量測、GPU 操作序列化
     api.py                HTTP + WebSocket

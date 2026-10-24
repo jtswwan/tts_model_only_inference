@@ -46,6 +46,8 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -303,6 +305,46 @@ def apply(entries: dict[str, dict[str, list[str]]]) -> dict[str, int]:
     return counts
 
 
+class _without_overrides:
+    """暫時把自訂發音從 upstream 的字典裡拿掉，用來看「原本會唸什麼」。
+
+    用加鎖的就地移除與還原，而不是複製整份字典 —— `pp_dict` 有 45,046 筆，
+    每次查詢都複製太浪費。鎖是為了不讓同時間的合成請求看到被拿掉的狀態。
+    """
+
+    def __init__(self, entries: dict[str, dict[str, list[str]]]):
+        self.entries = entries
+        self.saved: list[tuple[dict, str, Any]] = []
+
+    def __enter__(self):
+        _override_lock.acquire()
+        try:
+            targets = _target_dicts()
+        except Exception:  # noqa: BLE001
+            _override_lock.release()
+            raise
+        for lang in LANGS:
+            target = targets[lang]
+            for word in self.entries.get(lang, {}):
+                if word in target:
+                    self.saved.append((target, word, target.pop(word)))
+                    # upstream 原本有值的話要放回去（我們覆寫掉的那個）
+                    original = _originals.get(lang, {}).get(word, _MISSING)
+                    if original is not _MISSING:
+                        target[word] = original
+        return self
+
+    def __exit__(self, *exc):
+        for target, word, value in self.saved:
+            target[word] = value
+        self.saved.clear()
+        _override_lock.release()
+        return False
+
+
+_override_lock = threading.RLock()
+
+
 def restore(lang: str, word: str) -> bool:
     """把某個詞還原成 upstream 原本的值，不必重啟。"""
     if lang not in LANGS:
@@ -390,9 +432,6 @@ def flatten(entries: dict[str, dict[str, list[str]]]) -> list[str]:
 #
 # 做法是在執行期包住 `english.replace_phs`，不改 upstream 的檔案。實際回傳值
 # **一律交給原函式**，所以音訊輸出完全不變 —— 這裡只負責記錄。
-
-import threading  # noqa: E402
-from collections import deque  # noqa: E402
 
 _drops: deque[dict[str, Any]] = deque(maxlen=200)
 _drop_seq = 0
@@ -594,6 +633,20 @@ def lookup(text: str, entries: dict[str, dict[str, list[str]]] | None = None
 
     entries = load() if entries is None else entries
     cursor = drop_cursor()
+
+    # 先算一份「拿掉自訂發音之後」的讀音，讓介面能並排顯示原本的樣子
+    upstream_by_word: dict[tuple[str, str], list[str]] = {}
+    if any(entries.get(l) for l in LANGS):
+        try:
+            with _without_overrides(entries):
+                for seg in LangSegmenter.getTexts(text):
+                    raw = (_lookup_en(seg["text"], {}) if seg["lang"] == "en"
+                           else _lookup_zh(seg["text"], {}))
+                    for it in raw:
+                        key = (it["lang"], it["word"])
+                        upstream_by_word[key] = it.get("pinyin") or it.get("phones") or []
+        except Exception:  # noqa: BLE001
+            log.exception("取得 upstream 原本讀音失敗")
     # 逐片段處理，順序與 get_phones_and_bert() 相同。
     #
     # 注意「非 en 一律當成 zh」：LangSegmenter 會把中文誤判成 ja（實測
@@ -611,6 +664,11 @@ def lookup(text: str, entries: dict[str, dict[str, list[str]]] | None = None
             items.extend(_lookup_en(seg["text"], entries.get("en", {})))
         else:
             items.extend(_lookup_zh(seg["text"], entries.get("zh", {})))
+    for it in items:
+        up = upstream_by_word.get((it["lang"], it["word"]))
+        cur = it.get("pinyin") or it.get("phones") or []
+        it["upstream"] = up if up is not None else cur
+        it["changed"] = it["upstream"] != cur
     return {
         "text": text,
         "items": items,

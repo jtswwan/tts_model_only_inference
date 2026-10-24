@@ -194,9 +194,10 @@
     </div>
     <div class="msg" id="dictMsg"></div>
     <table><thead><tr>
-      <th>語言</th><th>詞</th><th>現在的發音</th><th>狀態</th><th style="width:230px">改成</th><th style="width:96px"></th>
+      <th>語言</th><th>詞</th><th>現在</th><th>原本（upstream）</th><th>教育部</th>
+      <th style="width:200px">自行更正</th><th style="width:150px"></th>
     </tr></thead><tbody id="dictRows">
-      <tr><td colspan="6" style="color:var(--fg-faint)">按上面的按鈕查詢</td></tr>
+      <tr><td colspan="7" style="color:var(--fg-faint)">按上面的按鈕查詢</td></tr>
     </tbody></table>
     <div class="note" id="dictHint" style="display:none"></div>
   </section>
@@ -512,7 +513,7 @@ setInterval(refresh, 5000);
 // 英文的發音單位是 ARPAbet 音素（W EY1 V），中文是拼音（dang4）。
 // 兩邊都在 server 端驗證：打錯會回 400 並指名哪個字的哪個音素 / 拼音，
 // 而不是像 upstream 的 replace_phs() 那樣把音靜默丟掉。
-let DICT = null;
+let DICT = null, LOOKUP = null;
 
 async function dictLoad() {
   try {
@@ -552,36 +553,72 @@ async function dictLookup() {
 function renderLookup(r) {
   const body = $("dictRows");
   if (!r.items.length) {
-    body.innerHTML = "<tr><td colspan='6' style='color:var(--fg-faint)'>這段文字沒有可查的詞</td></tr>";
+    body.innerHTML = "<tr><td colspan='7' style='color:var(--fg-faint)'>這段文字沒有可查的詞</td></tr>";
     return;
   }
+  LOOKUP = r;
   let anyShadow = false;
   body.innerHTML = r.items.map((it, i) => {
     const cur = (it.pinyin || it.phones || []).join(" ");
+    const up = (it.upstream || []).join(" ");
+    // 教育部可能有多個異讀，取第一個當建議值，其餘列出來讓人知道
+    const moe = it.moe && it.moe.length ? it.moe[0].join(" ") : "";
+    const moeAll = it.moe && it.moe.length > 1
+      ? it.moe.map((m) => m.join(" ")).join(" / ") : moe;
+
     const tags = [];
     if (it.custom) tags.push("<span class='pill ok'>自訂</span>");
-    if (it.letter_by_letter) tags.push("<span class='pill bad'>逐字母拼讀</span>");
+    if (it.letter_by_letter) tags.push("<span class='pill bad'>逐字母</span>");
     if (it.shadows_single_chars) { tags.push("<span class='pill'>整詞條目</span>"); anyShadow = true; }
-    if (!tags.length) tags.push("<span class='sub'>upstream 預設</span>");
-    const ph = it.lang === "en" ? "W EY1 V" : "dang4";
-    return "<tr><td>" + it.lang + "</td><td><b>" + esc(it.word) + "</b></td>" +
-      "<td><code>" + esc(cur) + "</code></td><td>" + tags.join(" ") + "</td>" +
+
+    const moeCell = !moe ? "<span class='sub'>辭典無此詞</span>"
+      : (it.moe_differs
+          ? "<code class='bad'>" + esc(moeAll) + "</code>"
+          : "<code>" + esc(moeAll) + "</code><span class='sub'> 相同</span>");
+
+    const btns = [];
+    if (moe && it.moe_differs) {
+      btns.push("<button data-act='moe' data-i='" + i + "'>用教育部</button>");
+    }
+    if (it.custom) {
+      btns.push("<button class='ghost' data-act='reset' data-i='" + i + "'>還原</button>");
+    }
+    btns.push("<button class='ghost' data-act='save' data-i='" + i + "'>存自訂</button>");
+
+    const ph = it.lang === "en" ? "W EY1 V" : "dang3 an4";
+    return "<tr><td>" + it.lang + "</td><td><b>" + esc(it.word) + "</b>" +
+      (it.moe_word && it.moe_word !== it.word ? "<span class='sub'> " + esc(it.moe_word) + "</span>" : "") +
+      "</td>" +
+      "<td><code>" + esc(cur) + "</code> " + tags.join(" ") + "</td>" +
+      "<td>" + (up === cur ? "<span class='sub'>同左</span>"
+                           : "<code>" + esc(up) + "</code>") + "</td>" +
+      "<td>" + moeCell + "</td>" +
       "<td><input id='dv" + i + "' value='" + esc(cur) + "' placeholder='" + ph + "'></td>" +
-      "<td><button class='ghost' data-i='" + i + "' data-lang='" + it.lang +
-      "' data-word='" + esc(it.word) + "' data-custom='" + (it.custom ? "1" : "") +
-      "'>" + (it.custom ? "刪除" : "存檔") + "</button></td></tr>";
+      "<td>" + btns.join(" ") + "</td></tr>";
   }).join("");
 
   const hint = $("dictHint");
+  const notes = [];
   if (anyShadow) {
-    hint.style.display = "";
-    hint.innerHTML = "標著「整詞條目」的詞，upstream 的 <code>polyphonic.rep</code> 已經有整詞的讀音" +
+    notes.push("標著「整詞條目」的詞，upstream 的 <code>polyphonic.rep</code> 已經有整詞讀音" +
       "（共 45,046 筆）。<code>correct_pronunciation()</code> <b>先查整詞，查到就直接回傳</b>，" +
-      "所以改那個詞裡的<b>單字</b>不會有反應 —— 要改就改整個詞。";
-  } else { hint.style.display = "none"; }
+      "所以改那個詞裡的<b>單字</b>不會有反應 —— 要改就改整個詞。");
+  }
+  if (r.moedict_available === false) {
+    notes.push("沒有教育部辭典，所以沒有那一欄。要有的話先跑 <code>" +
+      esc(r.moedict_hint || "python3 scripts/tw_check.py --download") + "</code>（14 MB，只抓一次）。");
+  } else {
+    notes.push("整個中文前端是<b>普通話</b>的（g2pw 用大陸語料訓練、" +
+      "<code>polyphonic.rep</code> 的 45,046 筆是大陸讀音），所以台／陸讀音不同的詞" +
+      "會以大陸讀音輸出。紅色的教育部讀音就是不一樣的。" +
+      "<b>注意</b>：教育部標準有些台灣口語不這樣唸（<code>說服 shui4 fu2</code>、" +
+      "<code>滑稽 gu3 ji1</code>），聽起來怪就按「還原」。");
+  }
+  if (notes.length) { hint.style.display = ""; hint.innerHTML = notes.join("<br><br>"); }
+  else { hint.style.display = "none"; }
 
-  body.querySelectorAll("button[data-word]").forEach((b) => {
-    b.addEventListener("click", () => dictSave(b));
+  body.querySelectorAll("button[data-act]").forEach((b) => {
+    b.addEventListener("click", () => dictAction(b));
   });
   if (r.dropped_phones && r.dropped_phones.length) {
     msg($("dictMsg"), "這段文字有音素會被丟掉：<code>" +
@@ -589,29 +626,40 @@ function renderLookup(r) {
   }
 }
 
-async function dictSave(btn) {
-  const lang = btn.dataset.lang, word = btn.dataset.word;
-  const isDelete = btn.dataset.custom === "1";
-  const val = $("dv" + btn.dataset.i).value.trim().split(/\s+/).filter(Boolean);
+// 三種動作：用教育部 / 存自訂（用輸入框的值）/ 還原成 upstream 原本的
+async function dictAction(btn) {
+  const i = btn.dataset.i, act = btn.dataset.act;
+  const it = LOOKUP.items[i];
+  let value = null;
+  if (act === "moe") value = it.moe[0];
+  else if (act === "save") value = $("dv" + i).value.trim().split(/\s+/).filter(Boolean);
+  await dictWrite(btn, it, act, value);
+}
+
+async function dictWrite(btn, it, act, value) {
+  const lang = it.lang, word = it.word;
   btn.disabled = true;
   clear($("dictMsg"));
   try {
-    let r;
-    if (isDelete) {
-      r = await api("/dict?lang=" + encodeURIComponent(lang) +
-                    "&word=" + encodeURIComponent(word), { method: "DELETE" });
-      msg($("dictMsg"), "已刪除 <b>" + esc(word) + "</b>，還原成 upstream 原本的讀音", "ok");
+    let done;
+    if (act === "reset") {
+      await api("/dict?lang=" + encodeURIComponent(lang) +
+                "&word=" + encodeURIComponent(word), { method: "DELETE" });
+      done = "已還原 <b>" + esc(word) + "</b> 成 upstream 原本的讀音";
     } else {
-      if (!val.length) { msg($("dictMsg"), "發音不能是空的", "bad"); btn.disabled = false; return; }
-      r = await api("/dict", {
+      if (!value || !value.length) { msg($("dictMsg"), "發音不能是空的", "bad"); btn.disabled = false; return; }
+      const r = await api("/dict", {
         method: "PUT", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lang, word, value: val }),
+        body: JSON.stringify({ lang, word, value }),
       });
-      msg($("dictMsg"), "已存檔 <b>" + esc(word) + "</b> → <code>" + esc(val.join(" ")) +
-        "</code>，已立刻生效（不用重啟）", "ok");
+      done = "已存檔 <b>" + esc(word) + "</b> → <code>" + esc(value.join(" ")) +
+        "</code>，立刻生效（不用重啟）" +
+        (r.normalized ? "。繁體已轉成簡體存為 <code>" + esc(r.stored_key) + "</code>" : "");
     }
     await dictLoad();
     await dictLookup();
+    // dictLookup() 會清掉訊息區，所以成功訊息要在它之後才顯示
+    msg($("dictMsg"), done, "ok");
   } catch (e) {
     msg($("dictMsg"), "失敗：" + esc(e.message), "bad");
     btn.disabled = false;
