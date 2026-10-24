@@ -32,6 +32,9 @@ samples/
 moedict/*.xz
 .moedict-cache.json
 
+# 展示用的離線控制台（由 scratchpad 的 build_demo.py 產生）
+demo_console.html
+
 # 備份檔（scripts/backup.py 產生）與還原時留下的副本
 gsv-backup-*.tar.gz
 *.bak
