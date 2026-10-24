@@ -12,12 +12,23 @@
     --accent: #5aa9f0; --ok: #46c08a; --warn: #e0b341; --bad: #e2605a;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
     --radius: 10px;
+    /* 深色優先。color-scheme 讓原生表單元件與捲軸跟著走，少了它
+       下拉選單與 scrollbar 會停在淺色，和整個版面對不起來。 */
+    color-scheme: dark;
   }
+  /* 淺色值寫兩次：一次給「跟隨系統」，一次給明確選淺色的使用者，
+     這樣兩個方向都蓋得過去。 */
   @media (prefers-color-scheme: light) {
     :root:not([data-theme="dark"]) {
       --bg: #f6f7f9; --panel: #fff; --panel-2: #f0f2f5; --line: #dfe3e8;
       --fg: #1a1d23; --fg-dim: #5a6472; --fg-faint: #8b94a3;
+      color-scheme: light;
     }
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f7f9; --panel: #fff; --panel-2: #f0f2f5; --line: #dfe3e8;
+    --fg: #1a1d23; --fg-dim: #5a6472; --fg-faint: #8b94a3;
+    color-scheme: light;
   }
   * { box-sizing: border-box; }
   body {
