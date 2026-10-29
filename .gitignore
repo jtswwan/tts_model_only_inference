@@ -35,6 +35,10 @@ moedict/*.xz
 # 展示用的離線控制台（由 scratchpad 的 build_demo.py 產生）
 demo_console.html
 
+# 對話記錄（含使用者貼過的密碼，絕對不要 commit）
+transcript-raw.jsonl
+transcript.md
+
 # 備份檔（scripts/backup.py 產生）與還原時留下的副本
 gsv-backup-*.tar.gz
 *.bak
