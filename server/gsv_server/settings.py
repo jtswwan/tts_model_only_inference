@@ -119,6 +119,11 @@ class Latency:
     # 優先順序：pronunciation.rep > 教育部 > upstream 的大陸讀音。
     zh_taiwan_readings: bool = False
 
+    # 中英混合的句子裡，拿掉 upstream 補在短英文片段前面的逗號（見 en_pad.py）。
+    # 「你發IG的時候」會被 upstream 變成「你發，IG的時候」，英文前面多一個停頓。
+    # 會改變送進模型的音素，所以預設關閉，開啟時列在 /health 的 quality.deviations。
+    zh_en_no_pad_comma: bool = False
+
     trim_bert: bool = True
     warmup_dummy_run: bool = True
     warmup_english_frontend: bool = True

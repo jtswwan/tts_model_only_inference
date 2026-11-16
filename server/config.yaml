@@ -69,6 +69,12 @@ latency:
   # 優先順序：pronunciation.rep > 教育部 > upstream。
   zh_taiwan_readings: true
 
+  # 中英混合的句子裡，拿掉 upstream 補在短英文片段前面的逗號。
+  # upstream 對不到 4 個音素的英文片段一律在前面補逗號（cleaner.py:48），
+  # 夾在中文裡的 IG、AI、OK 都會中：「你發IG的時候」變成「你發，IG的時候」，
+  # 實測英文前面多 140 ms 的靜音。整段都是英文時不受影響。
+  zh_en_no_pad_comma: true
+
   # 僅 profile=low 時生效
   overlap_length: 2
   min_chunk_length: 16

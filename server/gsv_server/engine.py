@@ -27,6 +27,7 @@ bootstrap.setup()
 
 from . import aliases  # noqa: E402
 from . import bert_trim  # noqa: E402
+from . import en_pad  # noqa: E402
 from . import gaptrim  # noqa: E402
 from . import moedict  # noqa: E402
 from . import zh_context  # noqa: E402
@@ -466,6 +467,10 @@ class Engine:
 
         self.text_cache = _PhoneBertCache(settings.latency.text_cache_size)
         pre = self.tts.text_preprocessor
+        if settings.latency.zh_en_no_pad_comma:
+            # 要包在快取裡面、特殊符號的包裝外面裝（見 en_pad.py）
+            pre.get_phones_and_bert = en_pad.wrap_get_phones_and_bert(pre.get_phones_and_bert)
+            pre.clean_text_inf = en_pad.wrap_clean_text_inf(pre.clean_text_inf)
         pre.get_phones_and_bert = self.text_cache.wrap(pre.get_phones_and_bert)
         # 特殊符號：使用者指定「這個符號直接發這串音」（見 aliases.py）。
         # 先讀一次表，檔案壞掉的話在啟動時就失敗，不要等到第一個請求。
@@ -513,6 +518,12 @@ class Engine:
                 "latency.zh_full_sentence_bert=true：中英混雜時中文的 BERT 改成"
                 "看整句（upstream 是被英文切成好幾段各看各的）。BERT 特徵會變，"
                 "斷詞與變調也可能跨越原本的片段邊界"
+            )
+        if lat.zh_en_no_pad_comma:
+            notes.append(
+                "latency.zh_en_no_pad_comma=true：中英混合的句子裡，拿掉 upstream 補在"
+                "短英文片段（不到 4 個音素，例如 IG、AI）前面的逗號（cleaner.py:48）。"
+                "那個逗號不在原文裡，會讓模型在英文前面停頓"
             )
         if lat.max_language_gap_ms > 0:
             notes.append(
