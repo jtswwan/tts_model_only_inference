@@ -585,6 +585,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             with _switch_lock:
                 entries = pronunciation.upsert(req.lang, req.word, req.value)
                 eng.custom_pronunciations = entries
+                # 前端快取是按文字存的音素。不清掉的話，改字典之前合成過的
+                # 句子會一直用舊的讀音 —— 查詢顯示已生效，聽起來卻沒變。
+                eng.text_cache.clear()
         except pronunciation.PronunciationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
@@ -610,6 +613,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             with _switch_lock:
                 entries = pronunciation.remove(lang, word)
                 eng.custom_pronunciations = entries
+                eng.text_cache.clear()
         except pronunciation.PronunciationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"entries": entries, "lookup": pronunciation.lookup(word, entries)}
