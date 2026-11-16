@@ -160,10 +160,69 @@ def _validate_en(words: dict[str, list[str]], source: str) -> list[str]:
         bad = [p for p in phones if p not in known]
         if bad:
             problems.append(
-                f"[en] {word}: text/symbols2.py 不認識的音素 {' '.join(bad)}"
-                f"（會被 replace_phs() 靜默丟掉）"
+                f"[en] {word}: 不認識的音素 {' '.join(bad)}。"
+                f"英文詞要填 ARPAbet（例如 B IY1），或帶聲調的拼音（例如 bi1、ei4）；"
+                f"不認識的音素會被 replace_phs() 靜默丟掉"
             )
     return problems
+
+
+def pinyin_to_phones(py: str) -> list[str] | None:
+    """把一個帶聲調的拼音（bi1）轉成 upstream 的中文音素（["b", "i1"]）。
+
+    轉法與 `chinese2.py:244-291` 相同，所以結果和那個字走中文前端時一模一樣。
+    不是合法音節就回 None。
+    """
+    bootstrap.require_setup()
+    from pypinyin.contrib.tone_convert import to_finals_tone3, to_initials
+
+    from text.chinese2 import pinyin_to_symbol_map
+
+    if py[-1:] not in "12345" or not py[:-1].isalpha() or not py.islower():
+        return None
+    try:
+        initial = to_initials(py)
+        final = to_finals_tone3(py, neutral_tone_with_five=True)
+    except Exception:  # noqa: BLE001
+        return None
+    if not final:
+        return None
+    key = _zh_pinyin_key(initial, final)
+    if key is None or key[0] not in pinyin_to_symbol_map:
+        return None
+    consonant, vowel = pinyin_to_symbol_map[key[0]].split(" ")
+    return [consonant, vowel + key[1]]
+
+
+def expand_en_value(value: list[str]) -> list[str]:
+    """英文詞的發音裡若夾了拼音，換成對應的中文音素。
+
+    用途：夾在中文句子裡的單一英文字母（「答案是 B」）只有兩個英文音素，
+    模型有時會整個吞掉。改用中文音素唸（B -> bi1）就穩，而且聲調可以自己挑。
+    英文和中文的音素在同一張符號表裡（symbols2），所以英文詞可以直接用。
+
+    ARPAbet 是大寫，不會和拼音撞。會撞的是「韻母本身也是合法音素」的情況：
+    `ei1` 既是完整的拼音（要轉成 `EE ei1`，零聲母要補上），也是 `b ei1`
+    裡已經拆好的韻母（不能再轉）。分辨方式是看前一個是不是聲母。
+    """
+    bootstrap.require_setup()
+    from text.symbols2 import symbols
+
+    known = set(symbols)
+
+    def is_initial(token: str) -> bool:
+        # 中文的聲母：小寫、不帶聲調（b、zh、y…），或零聲母記號 AA / EE / OO
+        return token in known and token[-1:] not in "012345" and (
+            token.islower() or token in ("AA", "EE", "OO")
+        )
+
+    out: list[str] = []
+    prev_initial = False
+    for token in value:
+        phones = None if prev_initial else pinyin_to_phones(token)
+        out.extend(phones if phones else [token])
+        prev_initial = phones is None and is_initial(token)
+    return out
 
 
 def _zh_pinyin_key(initial: str, final_with_tone: str) -> tuple[str, str] | None:
@@ -393,6 +452,8 @@ def upsert(lang: str, word: str, value: list[str],
     key = normalize_word(lang, word)
     if not key:
         raise PronunciationError("詞不能是空的")
+    if lang == "en":
+        value = expand_en_value(list(value))
     entries[lang][key] = list(value)
     save(entries, path)
     apply({lang: {key: list(value)}, **{l: {} for l in LANGS if l != lang}})
