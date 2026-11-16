@@ -698,6 +698,11 @@ def lookup(text: str, entries: dict[str, dict[str, list[str]]] | None = None
 
     # 直接發音的特殊符號不經過字典，查詢時拿掉；文字型的換成那段文字再查
     original, text = text, aliases.apply(text, for_lookup=True)
+    symbols = [e for e in aliases.describe() if e["kind"] == "phones" and e["symbol"] in original]
+    if not text.strip():
+        # 整段都是特殊符號。LangSegmenter 拿到空白字串會直接 IndexError。
+        return {"text": original, "aliased": text, "items": [], "symbols": symbols,
+                "dropped_phones": []}
 
     # 先算一份「拿掉自訂發音之後」的讀音，讓介面能並排顯示原本的樣子
     upstream_by_word: dict[tuple[str, str], list[str]] = {}
@@ -739,5 +744,7 @@ def lookup(text: str, entries: dict[str, dict[str, list[str]]] | None = None
         # 注音符號換成漢字之後實際送進前端的文字；沒換就和 text 相同
         "aliased": text,
         "items": items,
+        # 這段文字裡直接發音的特殊符號（不經過字典，在「特殊符號」那裡改）
+        "symbols": symbols,
         "dropped_phones": drops_since(cursor),
     }

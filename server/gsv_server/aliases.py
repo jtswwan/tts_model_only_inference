@@ -6,9 +6,10 @@
 
 一個符號可以對應兩種東西：
 
-  拼音 / 音素（`ㄏㄏ he1 he1`）
-      直接把這串音素送進模型，不經過任何漢字或英文單字。所以沒有對應漢字的
-      音也能用，聲母和韻母還可以自由組合（`f i1`、`EE E1`）。
+  音素（`ㄏ h e1`）
+      填什麼就送什麼：這串音素原樣送進模型，不經過任何漢字或英文單字。
+      所以沒有對應漢字的音也能用，聲母和韻母可以自由組合（`f i1`、`EE E1`），
+      只填聲母（`h`）也行。帶聲調的拼音（`he1`）是簡寫，會先拆成 `h e1`。
       不套用變調：填幾聲就是幾聲。
 
   文字（`ㄟ 欸`）
@@ -83,31 +84,42 @@ def _check(symbol: str, text: str, source: str = "") -> None:
         raise AliasError(f"{where}{symbol!r} 的內容不能是空的")
     if symbol in text:
         raise AliasError(f"{where}{symbol!r} 的內容裡不能再出現它自己")
-    if _looks_like_failed_pinyin(text):
+    bad = _bad_phones(text)
+    if bad:
         raise AliasError(
-            f"{where}{text!r} 看起來像拼音但聲調不對。聲調要 1-5"
-            f"（例如 he1、ei4；5 是輕聲）"
+            f"{where}不認識的音素：{' '.join(bad)}。聲調要 1-5（5 是輕聲），"
+            f"例如 h e1、f i1；或直接寫拼音 he1"
         )
 
 
-def _looks_like_failed_pinyin(text: str) -> bool:
-    """像拼音但不合格：小寫字母後面接了數字，卻解不成音素（he9、xq1）。"""
+def _bad_phones(text: str) -> list[str]:
+    """看起來是想填音素、卻有不認識的 token 時，回傳那些 token。
+
+    判斷「想填音素」的依據：全是 ASCII，而且有 token 帶數字（聲調）。
+    沒有這個檢查的話 `h e9` 會被安靜地當成一段英文文字存進去。
+    """
     tokens = text.split()
-    return (
-        bool(tokens)
-        and all(re.fullmatch(r"[a-z]+\d+", t) for t in tokens)
-        and phones_of(text) is None
-    )
+    if not tokens or not text.isascii() or not any(ch.isdigit() for ch in text):
+        return []
+    if phones_of(text) is not None:
+        return []
+    from text.symbols2 import symbols
+
+    from . import pronunciation
+
+    known = set(symbols)
+    return [t for t in tokens if any(p not in known for p in pronunciation.expand_en_value([t]))]
 
 
 def phones_of(content: str) -> list[str] | None:
-    """內容若是拼音 / 音素就回傳音素清單，是一般文字就回 None。
+    """內容若是音素 / 拼音就回傳音素清單，是一般文字就回 None。
 
-    判定條件：每個 token 都是帶聲調的拼音或合法音素，而且至少有一個帶聲調 ——
-    否則單獨一個 `a` 也會被當成音素（它剛好是合法的聲母符號）。
+    原則是「填什麼就送什麼」：每個 token 都是模型認得的音素（`h e1`、`f i1`、
+    單獨一個 `h` 也行），就原樣送進去。帶聲調的拼音（`he1`）只是簡寫，會先
+    拆成音素（`h e1`）。只要有一個 token 兩者都不是，整段就當成文字。
     """
     tokens = content.split()
-    if not tokens or not any(t[-1:].isdigit() for t in tokens):
+    if not tokens:
         return None
     from text.symbols2 import symbols
 
