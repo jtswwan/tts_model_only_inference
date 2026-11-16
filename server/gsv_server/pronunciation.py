@@ -84,6 +84,29 @@ class PronunciationError(RuntimeError):
     pass
 
 
+# ---- 符號代換 ----
+
+# 文字裡的注音符號，換成讀音相同的漢字再送進前端。
+#
+# 為什麼需要：`chinese2.py:68` 的 replace_punctuation() 把漢字與標點以外的
+# 字元全部刪掉，注音符號也在內 —— 「好ㄟ」送進去只剩「好」，而且沒有任何
+# 提示。台灣的口語文字裡 ㄟ 很常見。
+#
+# 換成漢字之後它就是一個普通的字：讀音走 [zh] 的自訂發音，在控制台查得到
+# 也改得了（例如 `欸 ei1`）。
+#
+# 為什麼是「欸」不是「誒」：`tone_sandhi.py:506` 把「诶」列在語氣詞裡，
+# 一律改成輕聲，自訂的聲調會被蓋掉。「欸」不在那份清單裡。
+SYMBOL_ALIASES = {"ㄟ": "欸"}
+
+
+def apply_aliases(text: str) -> str:
+    for symbol, char in SYMBOL_ALIASES.items():
+        if symbol in text:
+            text = text.replace(symbol, char)
+    return text
+
+
 # ---- 解析 ----
 
 
@@ -694,6 +717,7 @@ def lookup(text: str, entries: dict[str, dict[str, list[str]]] | None = None
 
     entries = load() if entries is None else entries
     cursor = drop_cursor()
+    original, text = text, apply_aliases(text)
 
     # 先算一份「拿掉自訂發音之後」的讀音，讓介面能並排顯示原本的樣子
     upstream_by_word: dict[tuple[str, str], list[str]] = {}
@@ -731,7 +755,9 @@ def lookup(text: str, entries: dict[str, dict[str, list[str]]] | None = None
         it["upstream"] = up if up is not None else cur
         it["changed"] = it["upstream"] != cur
     return {
-        "text": text,
+        "text": original,
+        # 注音符號換成漢字之後實際送進前端的文字；沒換就和 text 相同
+        "aliased": text,
         "items": items,
         "dropped_phones": drops_since(cursor),
     }
