@@ -223,13 +223,14 @@
     <div class="note">
       漢字和標點以外的字元（注音符號、表情符號、各種記號）會被前端<b>直接刪掉</b>，不會唸出來。
       在這裡指定某個符號要換成什麼文字，合成前會先換掉。<b>存檔立刻生效。</b>
+      右邊可以填文字（<code>呵呵</code>），也可以直接填帶聲調的拼音（<code>he1 he1</code>），會自動換成唸這個音的字。
       想調聲調：加完之後到上面的發音字典查那個字，改它的拼音（例如 <code>欸</code> → <code>ei1</code>）。
       代換用的字避開語氣詞（吧呢哈啊嘛哦耶喔誒…），那些字會被強制唸成輕聲。
     </div>
     <div class="row">
       <input id="aliasSym" placeholder="符號，例如 ㄏㄏ" style="width:180px;margin:0">
       <span>→</span>
-      <input id="aliasText" placeholder="換成什麼文字，例如 呵呵" style="width:260px;margin:0">
+      <input id="aliasText" placeholder="文字（呵呵）或拼音（he1 he1）" style="width:260px;margin:0">
       <button id="aliasAdd">新增 / 修改</button>
     </div>
     <div class="msg" id="aliasMsg"></div>
@@ -634,8 +635,15 @@ async function aliasAdd() {
     });
     aliasRender(r.entries);
     const said = (r.lookup.items || []).map(it => (it.pinyin || it.phones || []).join(" ")).join(" / ");
-    msg($("aliasMsg"), `已存：${esc(symbol)} → ${esc(text)}` + (said ? `，現在會唸成 <code>${esc(said)}</code>` : "") +
-      "。要改聲調按那一列的「查怎麼唸」。", "ok");
+    let note = `已存：${esc(symbol)} → ${esc(r.stored_text)}`;
+    if (r.resolved) {
+      note += `（你填的是拼音 <code>${esc(r.resolved.pinyin)}</code>，已換成唸這個音的字）`;
+      if (!r.resolved.exact) note += `<br><b>注意：實際會唸成 <code>${esc(r.resolved.phones.join(" "))}</code>，和你要的不完全一樣。</b>`;
+      for (const n of r.resolved.notes) note += "<br>" + esc(n);
+    }
+    note += (said ? `<br>現在會唸成 <code>${esc(said)}</code>` : "") + "。要改聲調按那一列的「查怎麼唸」。";
+    msg($("aliasMsg"), note, r.resolved && !r.resolved.exact ? "err" : "ok");
+    dictLoad();
     $("aliasSym").value = ""; $("aliasText").value = "";
   } catch (e) {
     msg($("aliasMsg"), "失敗：" + esc(e.message), "err");

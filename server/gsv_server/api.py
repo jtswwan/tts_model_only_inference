@@ -635,16 +635,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.put("/alias", summary="新增或修改一個特殊符號（立刻生效）")
     def alias_put(req: AliasRequest) -> dict[str, Any]:
         eng = engine()
+        text = req.text.strip()
+        resolved: dict[str, Any] | None = None
         try:
             with _switch_lock:
-                entries = aliases.upsert(req.symbol, req.text)
+                # 使用者填的是拼音（he1 he1）而不是文字：替他挑出唸起來正好是
+                # 這串拼音的漢字。不轉的話 he1 會被當成英文單字唸成 "he one"。
+                if aliases.looks_like_failed_pinyin(text):
+                    raise aliases.AliasError(
+                        f"{text!r} 看起來像拼音但聲調不對。拼音的聲調要 1-5"
+                        f"（例如 he1、ei4；5 是輕聲），或改填文字"
+                    )
+                if aliases.looks_like_pinyin(text):
+                    resolved = aliases.resolve_pinyin(text, eng.config.version)
+                    resolved["pinyin"] = text
+                    text = resolved["text"]
+                    # resolve 可能替某個字加了自訂讀音
+                    eng.custom_pronunciations = pronunciation.load()
+                entries = aliases.upsert(req.symbol, text)
                 eng.text_cache.clear()
-        except aliases.AliasError as exc:
+        except (aliases.AliasError, pronunciation.PronunciationError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         # 一併回報代換後的文字實際怎麼唸，使用者才知道要不要再去調聲調
         return {
             "entries": entries,
-            "lookup": pronunciation.lookup(req.text.strip(), eng.custom_pronunciations),
+            "stored_text": text,
+            "resolved": resolved,
+            "lookup": pronunciation.lookup(text, eng.custom_pronunciations),
         }
 
     @app.delete("/alias", summary="刪掉一個特殊符號")
