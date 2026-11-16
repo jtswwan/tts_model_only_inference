@@ -123,6 +123,10 @@ class Latency:
     warmup_dummy_run: bool = True
     warmup_english_frontend: bool = True
     text_cache_size: int = 512
+    # 暖機完把現有物件移出垃圾回收的掃描範圍。upstream 每個請求結尾都會
+    # 做一次完整回收，不凍結的話每次要掃 200 萬個物件（實測 300~800 ms）。
+    # 不影響輸出。見 engine._freeze_gc()。
+    freeze_gc: bool = True
 
 
 @dataclass

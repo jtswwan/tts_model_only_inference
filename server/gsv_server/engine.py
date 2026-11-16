@@ -9,10 +9,12 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import threading
 import time
 from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Iterator
 
 import numpy as np
@@ -33,6 +35,10 @@ from .settings import Settings  # noqa: E402
 from TTS_infer_pack.TTS import TTS, TTS_Config  # noqa: E402
 
 log = logging.getLogger("gsv.engine")
+
+# 產生器跑完的記號（next() 的預設值）。用獨立物件而不是 None，
+# 因為 None 理論上可以是合法的產出值。
+_EXHAUSTED = object()
 
 
 def _resolve_device(spec: str) -> str:
@@ -367,6 +373,9 @@ class Engine:
 
     GPU 操作一律序列化（單一鎖）。理由是低延遲的前提是「可預測」的延遲：
     多個請求在同一張 GPU 上爭搶會讓每一個都變慢且抖動，排隊反而可預測。
+
+    而且所有推論（暖機與每一個請求）都在同一條專用執行緒上跑，見
+    `_on_infer_thread()`。
     """
 
     def __init__(self, settings: Settings):
@@ -389,6 +398,19 @@ class Engine:
         self.pronunciation_counts: dict[str, int] = {}
         self.taiwan_readings = 0
 
+        # 專用的推論執行緒，理由見 _on_infer_thread()。載入與暖機也在它上面
+        # 做，這樣所有碰到模型的動作從頭到尾都在同一條執行緒上。
+        self._infer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gsv-infer")
+        self._gc_frozen = False
+        try:
+            self._on_infer_thread(self._load)
+        except BaseException:
+            self._infer.shutdown(wait=False)
+            raise
+
+    def _load(self) -> None:
+        """載入模型、套上快取並暖機。在推論執行緒上執行。"""
+        settings = self.settings
         self.detected = preflight(settings)
         if self.detected:
             log.info("SoVITS 檔頭判定: %s", self.detected)
@@ -442,7 +464,8 @@ class Engine:
             )
 
         self._warn_quality_deviations()
-        self.warmup()
+        # 已經在推論執行緒上了，直接呼叫 —— 再丟一次會等自己做完，卡死。
+        self._warmup()
 
     def _warn_quality_deviations(self) -> None:
         """把任何會影響輸出的設定偏離大聲講出來。
@@ -508,9 +531,37 @@ class Engine:
         else:
             log.info("所有會影響輸出的設定都與 upstream 預設一致")
 
+    # ---- 推論執行緒 ----
+
+    def _on_infer_thread(self, fn, *args):
+        """在專用的推論執行緒上執行 fn，並等它做完。
+
+        為什麼推論要釘在同一條執行緒上：PyTorch 的 cuDNN 卷積計畫快取是
+        **thread_local** 的（`aten/src/ATen/native/cudnn/Conv_v8.cpp` 的
+        `benchmark_cache`）。每遇到一組沒見過的卷積形狀，cuDNN 要先建
+        execution plan 才能算，建好的計畫只存在「當下那條執行緒」裡。
+
+        而 FastAPI 的同步端點跑在 anyio 的執行緒池上（預設 40 條），
+        `StreamingResponse` 對同步產生器更是每一次 `next()` 都可能換一條。
+        結果是暖機（在啟動用的那條執行緒上）建好的計畫，請求幾乎用不到，
+        同一個長度的音訊在每條執行緒上都要重建一次。
+
+        H200 實測（v2Pro、fp16）：SoVITS 解碼遇到沒見過的長度是 ~95 ms，
+        計畫已在快取裡是 ~30 ms，差的 ~65 ms 全算在 TTFA 裡。同一個 seed
+        在另一條執行緒上重跑，又是 ~95 ms。
+
+        計畫建好之後選到的演算法是同一個，所以這只影響快慢，不影響輸出
+        （固定 seed 實測：新建計畫與命中快取的音訊逐位元相同）。
+        """
+        return self._infer.submit(fn, *args).result()
+
     # ---- 暖機 ----
 
     def warmup(self) -> dict[str, float]:
+        """在推論執行緒上暖機（見 _warmup）。"""
+        return self._on_infer_thread(self._warmup)
+
+    def _warmup(self) -> dict[str, float]:
         """把所有能預先算完的東西算完。
 
         參考音訊是固定的，它只衍生四樣東西（見 README §5.3）：
@@ -552,9 +603,45 @@ class Engine:
                 pass
             timings["dummy_run"] = time.perf_counter() - t0
 
+        if self.settings.latency.freeze_gc:
+            t0 = time.perf_counter()
+            self._freeze_gc()
+            timings["freeze_gc"] = time.perf_counter() - t0
+
         self.warm = True
         log.info("暖機完成：%s", {k: round(v, 3) for k, v in timings.items()})
         return timings
+
+    def _freeze_gc(self) -> None:
+        """把暖機後還活著的物件移出垃圾回收的掃描範圍。
+
+        upstream 在每次 `TTS.run()` 的 finally 裡呼叫 `gc.collect()`
+        （`TTS.py` 的 `empty_cache()`，註解是「避免内存一直增长」）。那是
+        完整回收，要走過行程裡每一個被追蹤的物件 —— 而模型、jieba 詞典、
+        g2pw 的字典加上教育部辭典，暖機完大約有 200 萬個。
+
+        H200 那台機器上實測每個請求結尾花 300 ms（另一次量到 800 ms）在
+        這上面。它發生在最後一塊音訊產出之後，所以不算在 TTFA 裡，但是：
+
+          - 推論鎖在這段期間還沒放，下一個排隊的請求要多等這麼久
+          - `/tts`（回完整音檔）要等產生器結束才回應，這段時間直接加在
+            回應時間上
+          - Python 自動觸發的第 2 代回收是同一個成本，會隨機落在請求中間
+
+        `gc.freeze()` 把目前所有物件移到「永久代」，之後的回收（包含
+        upstream 那個 `gc.collect()`）只掃凍結之後才建立的物件，實測剩
+        ~1 ms。請求中產生的垃圾照樣會被回收，所以 upstream 想防的記憶體
+        增長仍然防得住。
+
+        這只改變垃圾回收掃描哪些物件，不碰任何運算，輸出不變。
+
+        凍結是整個行程的狀態：重新暖機或釋放引擎時要先 `gc.unfreeze()`，
+        否則舊模型裡有循環參照的物件永遠收不掉（見 `release()`）。
+        """
+        gc.unfreeze()
+        gc.collect()
+        gc.freeze()
+        self._gc_frozen = True
 
     def _warm_english_frontend(self) -> None:
         """付掉英文前端的一次性初始化成本。
@@ -637,12 +724,15 @@ class Engine:
         path = self.settings.resolve(self.settings.reference.audio)
         if not os.path.isfile(path):
             raise PreflightError(f"找不到參考音訊: {self.settings.reference.audio}")
-        self.warm = False
-        # prompt 文本可能跟著換，對應的前端快取一併清掉
-        self.text_cache.clear()
-        # 參考張量換了，舊的聲紋快取既失效也會一直抓著舊張量不放
-        self.sv_cache.clear()
-        return self.warmup()
+        # 要拿推論鎖：進行中的請求每產出一段就會把推論執行緒讓出來，沒有鎖的
+        # 話這裡的重新暖機會插進它的兩段之間，把它正在用的 prompt_cache 換掉。
+        with self._lock:
+            self.warm = False
+            # prompt 文本可能跟著換，對應的前端快取一併清掉
+            self.text_cache.clear()
+            # 參考張量換了，舊的聲紋快取既失效也會一直抓著舊張量不放
+            self.sv_cache.clear()
+            return self.warmup()
 
     # ---- 推論 ----
 
@@ -739,7 +829,13 @@ class Engine:
             samples = 0
             sample_rate = 0
             try:
-                for sr, chunk in source:
+                while True:
+                    # 產生器的每一步都在推論執行緒上跑（見 _on_infer_thread）。
+                    # 呼叫端是哪條執行緒、中途換了幾條都沒有關係。
+                    item = self._on_infer_thread(next, source, _EXHAUSTED)
+                    if item is _EXHAUSTED:
+                        break
+                    sr, chunk = item
                     if first_at is None:
                         first_at = time.perf_counter() - start
                         self._ttfa.append(first_at)
@@ -747,6 +843,13 @@ class Engine:
                     samples += len(chunk)
                     yield sr, chunk
             finally:
+                # 客戶端中途斷線時產生器還沒跑完。upstream 的收尾（TTS.run
+                # 的 finally）也要在推論執行緒上做，而且要在放掉鎖之前做完，
+                # 不能留給垃圾回收在隨便哪條執行緒上處理。
+                try:
+                    self._on_infer_thread(source.close)
+                except Exception:  # noqa: BLE001
+                    log.exception("關閉推論產生器失敗")
                 elapsed = time.perf_counter() - start
                 self._total.append(elapsed)
                 audio_s = samples / sample_rate if sample_rate else 0.0
@@ -771,12 +874,19 @@ class Engine:
         切換模型時要先釋放舊的再載入新的 —— 否則兩份模型會同時在 GPU 上，
         VRAM 短暫加倍。V100 上載第二份可能直接 OOM。
         """
-        self.text_cache.clear()
-        self.sv_cache.clear()
-        self.tts = None
-        self.config = None
-        import gc
-
+        # 拿推論鎖：等進行中的請求整個結束再放模型，不要在它的兩段之間抽掉。
+        with self._lock:
+            # 推論執行緒連同它的 cuDNN 計畫快取一起結束。
+            self._infer.shutdown(wait=True)
+            self.text_cache.clear()
+            self.sv_cache.clear()
+            self.tts = None
+            self.config = None
+        # 先解凍：凍結中的物件不會被回收，不解凍的話舊模型裡有循環參照的
+        # 部分會一直留著。
+        if self._gc_frozen:
+            gc.unfreeze()
+            self._gc_frozen = False
         gc.collect()
         try:
             import torch

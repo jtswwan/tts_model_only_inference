@@ -78,6 +78,9 @@ latency:
   trim_bert: true
   warmup_dummy_run: true
   text_cache_size: 512
+  # 暖機完凍結垃圾回收的掃描範圍。upstream 每個請求結尾都做一次完整回收，
+  # 不凍結的話每次掃 200 萬個物件（H200 那台實測 300~800 ms，期間鎖不放）。
+  freeze_gc: true
 
 server:
   host: 0.0.0.0
