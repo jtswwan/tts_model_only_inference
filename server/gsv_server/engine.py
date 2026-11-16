@@ -855,8 +855,8 @@ class Engine:
         profile = profile or lat.profile
 
         inputs: dict[str, Any] = {
-            # 注音符號先換成漢字，否則 upstream 會把它整個刪掉
-            # （見 pronunciation.SYMBOL_ALIASES）。
+            # 特殊符號先換成唸得出來的文字，否則 upstream 會把它整個刪掉
+            # （見 aliases.py）。
             "text": pronunciation.apply_aliases(text),
             "text_lang": text_lang or s.text_lang,
             # 參考音訊路徑仍要傳，但 prompt_cache 已在暖機時填好，

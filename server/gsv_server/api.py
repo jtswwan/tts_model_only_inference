@@ -27,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from . import moedict, pronunciation, wavio
+from . import aliases, moedict, pronunciation, wavio
 from .engine import Engine, PreflightError, preflight
 from .settings import ALLOWED_LANGS, Settings, load
 
@@ -72,6 +72,11 @@ class DictRequest(BaseModel):
     word: str = Field(..., min_length=1)
     # 英文是 ARPAbet 音素（["W","EY1","V"]），中文是拼音（["dang4"]）
     value: list[str] = Field(..., min_length=1)
+
+
+class AliasRequest(BaseModel):
+    symbol: str = Field(..., min_length=1, description="要代換的符號，例如 ㄟ")
+    text: str = Field(..., min_length=1, description="換成什麼文字，例如 欸")
 
 
 class LookupRequest(BaseModel):
@@ -617,5 +622,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except pronunciation.PronunciationError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"entries": entries, "lookup": pronunciation.lookup(word, entries)}
+
+    # ---- 特殊符號 ----
+    #
+    # upstream 把漢字與標點以外的字元全部刪掉（chinese2.py:68），注音符號、
+    # 表情符號都在內。這組端點讓使用者自己決定某個符號要唸成什麼文字。
+
+    @app.get("/alias", summary="列出特殊符號代換表")
+    def alias_list() -> dict[str, Any]:
+        return {"path": str(aliases.DEFAULT_PATH), "entries": aliases.table()}
+
+    @app.put("/alias", summary="新增或修改一個特殊符號（立刻生效）")
+    def alias_put(req: AliasRequest) -> dict[str, Any]:
+        eng = engine()
+        try:
+            with _switch_lock:
+                entries = aliases.upsert(req.symbol, req.text)
+                eng.text_cache.clear()
+        except aliases.AliasError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        # 一併回報代換後的文字實際怎麼唸，使用者才知道要不要再去調聲調
+        return {
+            "entries": entries,
+            "lookup": pronunciation.lookup(req.text.strip(), eng.custom_pronunciations),
+        }
+
+    @app.delete("/alias", summary="刪掉一個特殊符號")
+    def alias_delete(symbol: str = Query(..., min_length=1)) -> dict[str, Any]:
+        eng = engine()
+        try:
+            with _switch_lock:
+                entries = aliases.remove(symbol)
+                eng.text_cache.clear()
+        except aliases.AliasError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"entries": entries}
 
     return app
