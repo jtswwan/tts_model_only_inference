@@ -84,16 +84,6 @@ class PronunciationError(RuntimeError):
     pass
 
 
-# ---- 符號代換 ----
-
-
-def apply_aliases(text: str) -> str:
-    """把特殊符號換成唸得出來的文字（見 aliases.py）。"""
-    from . import aliases
-
-    return aliases.apply(text)
-
-
 # ---- 解析 ----
 
 
@@ -704,7 +694,10 @@ def lookup(text: str, entries: dict[str, dict[str, list[str]]] | None = None
 
     entries = load() if entries is None else entries
     cursor = drop_cursor()
-    original, text = text, apply_aliases(text)
+    from . import aliases
+
+    # 直接發音的特殊符號不經過字典，查詢時拿掉；文字型的換成那段文字再查
+    original, text = text, aliases.apply(text, for_lookup=True)
 
     # 先算一份「拿掉自訂發音之後」的讀音，讓介面能並排顯示原本的樣子
     upstream_by_word: dict[tuple[str, str], list[str]] = {}

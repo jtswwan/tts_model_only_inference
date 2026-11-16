@@ -25,6 +25,7 @@ from . import bootstrap
 # 在 import 之前完成。
 bootstrap.setup()
 
+from . import aliases  # noqa: E402
 from . import bert_trim  # noqa: E402
 from . import gaptrim  # noqa: E402
 from . import moedict  # noqa: E402
@@ -466,6 +467,10 @@ class Engine:
         self.text_cache = _PhoneBertCache(settings.latency.text_cache_size)
         pre = self.tts.text_preprocessor
         pre.get_phones_and_bert = self.text_cache.wrap(pre.get_phones_and_bert)
+        # 特殊符號：使用者指定「這個符號直接發這串音」（見 aliases.py）。
+        # 先讀一次表，檔案壞掉的話在啟動時就失敗，不要等到第一個請求。
+        aliases.table()
+        pre.clean_text_inf = aliases.wrap_clean_text_inf(pre.clean_text_inf)
 
         # SV 聲紋快取只有 v2Pro 系列需要（v4 的 is_v2pro 為 False，
         # TTS.py:1259 根本不會呼叫 compute_embedding3）。
@@ -855,9 +860,8 @@ class Engine:
         profile = profile or lat.profile
 
         inputs: dict[str, Any] = {
-            # 特殊符號先換成唸得出來的文字，否則 upstream 會把它整個刪掉
-            # （見 aliases.py）。
-            "text": pronunciation.apply_aliases(text),
+            # 特殊符號先換掉，否則 upstream 會把它整個刪掉（見 aliases.py）。
+            "text": aliases.apply(text),
             "text_lang": text_lang or s.text_lang,
             # 參考音訊路徑仍要傳，但 prompt_cache 已在暖機時填好，
             # TTS.py:1133 比對路徑相同就不會重算（見 README §5.3）。

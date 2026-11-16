@@ -1,40 +1,63 @@
-"""特殊符號代換：把文字裡的符號換成別的文字，再送進前端。
+"""特殊符號：讓使用者決定某個符號要發什麼音。
 
 為什麼需要：`chinese2.py:68` 的 replace_punctuation() 把漢字與標點以外的字元
 全部刪掉 —— 注音符號、表情符號、各種記號都在內。「好ㄟ」送進去只剩「好」，
 而且沒有任何提示。
 
-做法是最單純的文字取代：合成前把符號換成一段唸得出來的文字（`ㄟ` -> `欸`、
-`ㄏㄏ` -> `呵呵`）。換完之後它就是普通的文字，讀音照一般流程走，想調聲調
-就到發音字典改那個字（例如 `欸 ei1`）。
+一個符號可以對應兩種東西：
 
-選代換用的字時要避開語氣詞：`tone_sandhi.py:506` 把「吧呢哈啊呐噻嘛吖嗨哦哒
-额滴哩哟喽啰耶喔诶」這些字一律改成輕聲，自訂的聲調會被蓋掉。所以 ㄟ 用
-「欸」而不是「誒」。
+  拼音 / 音素（`ㄏㄏ he1 he1`）
+      直接把這串音素送進模型，不經過任何漢字或英文單字。所以沒有對應漢字的
+      音也能用，聲母和韻母還可以自由組合（`f i1`、`EE E1`）。
+      不套用變調：填幾聲就是幾聲。
 
-這張表存在 `server/aliases.rep`，一行一筆：`符號 代換文字`。檔案不存在時用
-內建的預設值；第一次修改時才寫檔。可以用控制台的「特殊符號」編輯。
+  文字（`ㄟ 欸`）
+      合成前把符號換成這段文字，之後照一般文字處理。
+
+這張表存在 `server/aliases.rep`，一行一筆：`符號 內容`。檔案不存在時用內建的
+預設值；第一次修改時才寫檔。可以用控制台的「特殊符號」編輯。
+
+直接送音素是怎麼做到的
+----------------------
+upstream 的前端把文字切成中文片段與英文片段，每個片段各自呼叫
+`TextPreprocessor.clean_text_inf()` 轉成音素（TextPreprocessor.py:175-180）。
+英文片段不算 BERT 特徵，`get_bert_inf()` 直接給零（:216-220）。
+
+所以：合成前把符號換成一個不可能出現在正常文字裡的假英文單字（佔位詞），
+它會被切成英文片段；再包住 `clean_text_inf()`，看到佔位詞就直接回傳使用者
+指定的音素，不去問英文的 g2p。BERT 特徵照英文片段的規則是零，和夾在中文裡的
+英文單字一樣。
+
+沒有借用英文字典（pronunciation.rep 的 [en]），也沒有改 upstream 的檔案。
 """
 
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
+from typing import Any, Callable
 
 from .bootstrap import VENDOR_ROOT
 
 DEFAULT_PATH = VENDOR_ROOT / "aliases.rep"
 
 # 檔案不存在時的內容
-DEFAULTS: dict[str, str] = {"ㄟ": "欸"}
+DEFAULTS: dict[str, str] = {"ㄟ": "ei1"}
 
 HEADER = """\
-# 特殊符號代換 —— 本專案自己的檔案，不是 vendored upstream
+# 特殊符號 —— 本專案自己的檔案，不是 vendored upstream
 #
-# 一行一筆：符號 代換文字
-# 合成前會把文字裡的「符號」換成「代換文字」。符號不能含空白。
-# 可以用控制台的「特殊符號」編輯，也可以直接手改（改完重啟 server）。
+# 一行一筆：符號 內容
+#   內容是帶聲調的拼音（he1 he1）或音素（f i1）-> 直接發這串音
+#   內容是文字（呵呵）                         -> 合成前換成這段文字
+# 符號不能含空白。可以用控制台的「特殊符號」編輯，也可以直接手改
+# （改完重啟 server）。
 """
+
+# 佔位詞：gsvsym + 小寫字母編號。全小寫 ASCII 字母，LangSegmenter 才會把它判成
+# 英文、而且不會從中間拆開。
+_PLACEHOLDER_RE = re.compile(r"gsvsym[a-z]+")
 
 
 class AliasError(RuntimeError):
@@ -43,6 +66,9 @@ class AliasError(RuntimeError):
 
 _lock = threading.Lock()
 _table: dict[str, str] | None = None
+# 佔位詞 -> (符號, 音素)；每次表變動時重建
+_placeholders: dict[str, tuple[str, list[str]]] = {}
+_symbol_to_placeholder: dict[str, str] = {}
 
 
 def _check(symbol: str, text: str, source: str = "") -> None:
@@ -54,9 +80,44 @@ def _check(symbol: str, text: str, source: str = "") -> None:
     if symbol.startswith("#"):
         raise AliasError(f"{where}符號不能以 # 開頭（那是註解）")
     if not text:
-        raise AliasError(f"{where}{symbol!r} 的代換文字不能是空的")
+        raise AliasError(f"{where}{symbol!r} 的內容不能是空的")
     if symbol in text:
-        raise AliasError(f"{where}{symbol!r} 的代換文字裡不能再出現它自己")
+        raise AliasError(f"{where}{symbol!r} 的內容裡不能再出現它自己")
+    if _looks_like_failed_pinyin(text):
+        raise AliasError(
+            f"{where}{text!r} 看起來像拼音但聲調不對。聲調要 1-5"
+            f"（例如 he1、ei4；5 是輕聲）"
+        )
+
+
+def _looks_like_failed_pinyin(text: str) -> bool:
+    """像拼音但不合格：小寫字母後面接了數字，卻解不成音素（he9、xq1）。"""
+    tokens = text.split()
+    return (
+        bool(tokens)
+        and all(re.fullmatch(r"[a-z]+\d+", t) for t in tokens)
+        and phones_of(text) is None
+    )
+
+
+def phones_of(content: str) -> list[str] | None:
+    """內容若是拼音 / 音素就回傳音素清單，是一般文字就回 None。
+
+    判定條件：每個 token 都是帶聲調的拼音或合法音素，而且至少有一個帶聲調 ——
+    否則單獨一個 `a` 也會被當成音素（它剛好是合法的聲母符號）。
+    """
+    tokens = content.split()
+    if not tokens or not any(t[-1:].isdigit() for t in tokens):
+        return None
+    from text.symbols2 import symbols
+
+    from . import pronunciation
+
+    known = set(symbols)
+    phones = pronunciation.expand_en_value(tokens)
+    if all(p in known for p in phones):
+        return phones
+    return None
 
 
 def parse(content: str, source: str = "<string>") -> dict[str, str]:
@@ -89,196 +150,160 @@ def _save(table: dict[str, str], path: Path | None = None) -> None:
     tmp.replace(path)
 
 
-def table() -> dict[str, str]:
-    """目前生效的代換表（副本）。第一次呼叫時讀檔。"""
+def _letters(index: int) -> str:
+    """0 -> a、25 -> z、26 -> ba …（只用字母，佔位詞裡不能有數字）"""
+    out = ""
+    while True:
+        index, rem = divmod(index, 26)
+        out = chr(ord("a") + rem) + out
+        if index == 0:
+            return out
+
+
+def _install(table: dict[str, str]) -> None:
+    """換上新的表，並重建佔位詞。呼叫端要先拿 _lock。"""
     global _table
+    placeholders: dict[str, tuple[str, list[str]]] = {}
+    by_symbol: dict[str, str] = {}
+    for index, symbol in enumerate(sorted(table)):
+        phones = phones_of(table[symbol])
+        if phones is not None:
+            word = "gsvsym" + _letters(index)
+            placeholders[word] = (symbol, phones)
+            by_symbol[symbol] = word
+    _table = dict(table)
+    _placeholders.clear()
+    _placeholders.update(placeholders)
+    _symbol_to_placeholder.clear()
+    _symbol_to_placeholder.update(by_symbol)
+
+
+def _current() -> dict[str, str]:
+    if _table is None:
+        _install(load())
+    return _table  # type: ignore[return-value]
+
+
+def table() -> dict[str, str]:
+    """目前生效的表（副本）。第一次呼叫時讀檔。"""
     with _lock:
-        if _table is None:
-            _table = load()
-        return dict(_table)
+        return dict(_current())
+
+
+def describe() -> list[dict[str, Any]]:
+    """給控制台用：每個符號的內容，以及它是直接發音還是換成文字。"""
+    with _lock:
+        current = dict(_current())
+        direct = {sym: _placeholders[word][1] for sym, word in _symbol_to_placeholder.items()}
+    return [
+        {
+            "symbol": symbol,
+            "content": current[symbol],
+            "kind": "phones" if symbol in direct else "text",
+            "phones": direct.get(symbol),
+        }
+        for symbol in sorted(current)
+    ]
 
 
 def upsert(symbol: str, text: str) -> dict[str, str]:
     """新增或修改一筆，寫檔並立刻生效。"""
-    global _table
-    symbol, text = symbol.strip(), text.strip()
+    symbol, text = symbol.strip(), " ".join(text.split())
     _check(symbol, text)
     with _lock:
-        current = dict(_table) if _table is not None else load()
+        current = dict(_current())
         current[symbol] = text
         _save(current)
-        _table = current
+        _install(current)
         return dict(current)
 
 
 def remove(symbol: str) -> dict[str, str]:
-    global _table
     symbol = symbol.strip()
     with _lock:
-        current = dict(_table) if _table is not None else load()
+        current = dict(_current())
         if symbol not in current:
-            raise AliasError(f"代換表裡沒有 {symbol!r}")
+            raise AliasError(f"表裡沒有 {symbol!r}")
         del current[symbol]
         _save(current)
-        _table = current
+        _install(current)
         return dict(current)
 
 
-def apply(text: str) -> str:
-    """把文字裡的符號換掉。長的符號先換，`ㄏㄏ` 才不會被 `ㄏ` 搶先拆開。"""
-    current = table()
+def apply(text: str, *, for_lookup: bool = False) -> str:
+    """把文字裡的符號換掉。長的符號先換，`ㄏㄏ` 才不會被 `ㄏ` 搶先拆開。
+
+    直接發音的符號換成佔位詞（前後補空白，免得和相鄰的英文字黏在一起）；
+    文字型的換成那段文字。
+
+    `for_lookup=True` 給發音字典的查詢用：直接發音的符號整個拿掉 —— 它不經過
+    字典，查詢結果裡出現佔位詞只會讓人困惑。
+    """
+    with _lock:
+        current = dict(_current())
+        by_symbol = dict(_symbol_to_placeholder)
     for symbol in sorted(current, key=len, reverse=True):
-        if symbol in text:
+        if symbol not in text:
+            continue
+        if symbol in by_symbol:
+            text = text.replace(symbol, " " if for_lookup else f" {by_symbol[symbol]} ")
+        else:
             text = text.replace(symbol, current[symbol])
     return text
 
 
-# ---- 用拼音指定讀音 ----
+def wrap_clean_text_inf(original: Callable) -> Callable:
+    """包住 `TextPreprocessor.clean_text_inf`，讓佔位詞直接變成指定的音素。
 
-# tone_sandhi.py:506 一律改成輕聲的字。拿來當代換字的話，指定的聲調會被蓋掉。
-_FORCED_NEUTRAL = set("吧呢哈啊呐噻嘛吖嗨哦哒额滴哩哟喽啰耶喔诶")
+    只處理「英文片段裡有佔位詞」的情況，其他一律原樣交給 upstream。
 
-_index: dict[str, list[str]] | None = None
-_freq: dict[str, int] = {}
-
-# 借用一個字並改它的讀音時，只借罕用字：那筆自訂讀音對所有句子都生效，
-# 借到常用字（例如把「哪」改成 ne5）會把別的句子唸壞。
-_BORROW_MAX_FREQ = 300
-
-
-def looks_like_pinyin(text: str) -> bool:
-    """整段都是「小寫字母 + 聲調數字」的音節（he1 he1）才算。"""
-    tokens = text.split()
-    return bool(tokens) and all(
-        t[-1:] in "12345" and t[:-1].isalpha() and t[:-1].isascii() and t.islower()
-        for t in tokens
-    )
-
-
-def looks_like_failed_pinyin(text: str) -> bool:
-    """像拼音但不合格：小寫字母後面接了數字，可是不是 1-5（he9、ei0）。"""
-    import re
-
-    tokens = text.split()
-    return (
-        bool(tokens)
-        and all(re.fullmatch(r"[a-z]+\d+", t) for t in tokens)
-        and not looks_like_pinyin(text)
-    )
-
-
-def _char_index() -> dict[str, list[str]]:
-    """拼音（帶調）-> 讀這個音的常用字，最常用的排前面。第一次用時建立。"""
-    global _index
-    if _index is not None:
-        return _index
-    from pypinyin import Style, pinyin
-
-    try:
-        import jieba_fast as jieba
-    except Exception:  # noqa: BLE001
-        import jieba
-    jieba.initialize()
-    freq = getattr(jieba.dt, "FREQ", {}) or {}
-    index: dict[str, list[tuple[int, int, str]]] = {}
-    for code in range(0x4E00, 0x9FA6):
-        char = chr(code)
-        readings = pinyin(char, style=Style.TONE3, heteronym=True, neutral_tone_with_five=True)[0]
-        for rank, reading in enumerate(readings):
-            # 主要讀音排在破音讀法前面，同一級再照詞頻排
-            index.setdefault(reading, []).append((rank, -freq.get(char, 0), char))
-    _index = {k: [c for _, _, c in sorted(v)] for k, v in index.items()}
-    _freq.update({c: freq.get(c, 0) for v in _index.values() for c in v})
-    return _index
-
-
-def resolve_pinyin(text: str, version: str) -> dict:
-    """把一串拼音變成「唸出來正好是這串拼音」的漢字。
-
-    使用者想的是「這個符號唸 he1 he1」，但代換表存的是文字。這裡替每個音節
-    挑一個字，然後用**真正的前端**唸一次確認結果相符 —— 不相符的字不用。
-
-    找不到天生就唸這個音的字時（例如 ei1），退而求其次：挑一個同音節的字，
-    在發音字典裡替它加一筆自訂讀音。那會改到這個字在所有句子裡的讀音，
-    所以會在回傳的 notes 裡講明。
-
-    回傳 {"text": 漢字, "phones": 實際音素, "expected": 想要的音素,
-          "exact": 是否相符, "notes": [...]}。
+    片段裡佔位詞以外的部分：
+      - 有英文字母或數字的：是真的英文，交給 upstream 的英文前端
+      - 只有標點的：照 `chinese2.rep_map` 轉成標點音素。交給英文前端的話，
+        全形標點會被丟掉（「ㄟ，你好」的逗號就不見了）
     """
-    from text.cleaner import clean_text
 
-    from . import pronunciation
+    def wrapped(text: str, language: str, version: str = "v2"):
+        if language.replace("all_", "") != "en" or not _PLACEHOLDER_RE.search(text):
+            return original(text, language, version)
 
-    def speak(chars: str) -> list[str]:
-        phones = clean_text(chars, "zh", version)[0]
-        return [p for p in phones if p[:1].isalnum()]
+        from text import cleaned_text_to_sequence
+        from text.chinese2 import rep_map
+        from text.symbols2 import punctuation
 
-    index = _char_index()
-    # 已經有自訂讀音的字不借：會把使用者原本的設定蓋掉
-    taken = set(pronunciation.load().get("zh", {}))
-    notes: list[str] = []
-    chosen: list[str] = []
-    expected: list[str] = []
-    for syllable in text.split():
-        want = pronunciation.pinyin_to_phones(syllable)
-        if want is None:
-            raise AliasError(f"{syllable!r} 不是合法的拼音音節（要像 he1、ei4 這樣，聲調 1-5）")
-        expected.extend(want)
-        picked = None
-        for char in index.get(syllable, [])[:40]:
-            if char in _FORCED_NEUTRAL or char in SKIP_CARRIERS:
-                continue
-            if speak(char) == want:
-                picked = char
-                break
-        if picked is None:
-            # 沒有天生唸這個音的字：借一個同音節的罕用字，替它加自訂讀音
-            base = syllable[:-1]
-            pool = {c for tone in "12345" for c in index.get(base + tone, [])}
-            pool = sorted(
-                (c for c in pool if _freq.get(c, 0) <= _BORROW_MAX_FREQ),
-                key=lambda c: (-_freq.get(c, 0), c),
-            )
-            for char in pool:
-                if char in _FORCED_NEUTRAL or char in SKIP_CARRIERS:
+        with _lock:
+            placeholders = dict(_placeholders)
+
+        ids: list[int] = []
+        norm: list[str] = []
+        pos = 0
+        pieces: list[tuple[str, bool]] = []
+        for match in _PLACEHOLDER_RE.finditer(text):
+            pieces.append((text[pos:match.start()], False))
+            pieces.append((match.group(), True))
+            pos = match.end()
+        pieces.append((text[pos:], False))
+
+        for piece, is_placeholder in pieces:
+            if is_placeholder:
+                entry = placeholders.get(piece)
+                if entry is None:
+                    # 表在這段文字換好佔位詞之後被改掉了。當作這個符號不存在。
                     continue
-                if pronunciation.normalize_word("zh", char) in taken:
-                    continue
-                try:
-                    pronunciation.upsert("zh", char, [syllable])
-                except pronunciation.PronunciationError:
-                    continue
-                if speak(char) == want:
-                    picked = char
-                    notes.append(
-                        f"沒有天生唸 {syllable} 的字，所以借用罕用字「{char}」並在發音字典加了一筆"
-                        f"「{char} {syllable}」"
-                    )
-                    break
-                pronunciation.remove("zh", char)
-        if picked is None:
-            raise AliasError(
-                f"找不到能唸成 {syllable} 的字。可以改填一個讀音相近的漢字，"
-                f"再到發音字典調它的聲調"
-            )
-        chosen.append(picked)
+                symbol, phones = entry
+                ids.extend(cleaned_text_to_sequence(phones, version))
+                norm.append(symbol)
+            elif re.search(r"[A-Za-z0-9]", piece):
+                piece_ids, _, piece_norm = original(piece, language, version)
+                ids.extend(piece_ids)
+                norm.append(piece_norm)
+            else:
+                marks = [rep_map.get(ch, ch) for ch in piece]
+                marks = [m for m in marks if m in punctuation]
+                if marks:
+                    ids.extend(cleaned_text_to_sequence(marks, version))
+                    norm.append("".join(marks))
+        # 英文片段不用 word2ph（get_bert_inf 對非中文直接給零）
+        return ids, None, "".join(norm)
 
-    result = "".join(chosen)
-    phones = speak(result)
-    if phones != expected:
-        # 每個字單獨唸都對，連在一起不一樣：國語的連讀變調（兩個三聲相連，
-        # 前一個變二聲…）。那是 upstream 照規則做的，真人也這樣唸，不去擋它。
-        notes.append(
-            "連在一起唸時，聲調照國語的變調規則變了（例如兩個三聲相連，前一個唸二聲）"
-        )
-    return {
-        "text": result,
-        "phones": phones,
-        "expected": expected,
-        "exact": phones == expected,
-        "notes": notes,
-    }
-
-
-# 不拿來當代換字的字：一和不有自己的變調規則，讀音會隨後面的字改變
-SKIP_CARRIERS = set("一不")
+    return wrapped
