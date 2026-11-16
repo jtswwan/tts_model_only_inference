@@ -183,6 +183,9 @@
     <div class="row">
       <button id="go">合成並量測</button>
       <button class="ghost" id="dl" disabled>下載 WAV</button>
+      <label style="margin:0;display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="live" checked style="width:auto;margin:0"> 邊收邊播
+      </label>
       <span class="pill" id="synthInfo">—</span>
     </div>
     <audio id="player" controls></audio>
@@ -433,6 +436,37 @@ function wavBlob(pcmBytes, sampleRate) {
   return new Blob([buf], { type: "audio/wav" });
 }
 
+/* 邊收邊播：收到一塊 PCM 就排進 Web Audio 的時間軸，不等整段下載完。
+   <audio> 要拿到完整的檔案才能播，所以第一塊音訊到了也只能乾等。 */
+let AUDIO_CTX = null, LIVE_NODES = [];
+function liveStop() {
+  for (const n of LIVE_NODES) { try { n.stop(); } catch (e) {} }
+  LIVE_NODES = [];
+}
+function livePlayer(sampleRate) {
+  // AudioContext 要在使用者的點擊裡建立或 resume，瀏覽器才准出聲
+  AUDIO_CTX = AUDIO_CTX || new (window.AudioContext || window.webkitAudioContext)();
+  AUDIO_CTX.resume();
+  liveStop();
+  let next = 0, carry = null;
+  return function feed(bytes) {
+    // 網路切塊不保證落在樣本邊界上，奇數個 byte 的那一個留到下一塊
+    if (carry) { const m = new Uint8Array(bytes.length + 1); m[0] = carry[0]; m.set(bytes, 1); bytes = m; carry = null; }
+    if (bytes.length % 2) { carry = bytes.slice(-1); bytes = bytes.subarray(0, bytes.length - 1); }
+    const n = bytes.length / 2;
+    if (!n) return;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+    const buf = AUDIO_CTX.createBuffer(1, n, sampleRate), ch = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) ch[i] = view.getInt16(i * 2, true) / 32768;
+    const node = AUDIO_CTX.createBufferSource();
+    node.buffer = buf; node.connect(AUDIO_CTX.destination);
+    // 接在上一塊的結尾；生成追不上播放時（或第一塊）從現在起算
+    next = Math.max(next, AUDIO_CTX.currentTime + 0.03);
+    node.start(next); next += buf.duration;
+    LIVE_NODES.push(node);
+  };
+}
+
 async function synthesize() {
   const text = $("text").value.trim();
   if (!text) { msg($("synthMsg"), "請先輸入文字", "err"); return; }
@@ -441,11 +475,15 @@ async function synthesize() {
   const original = btn.textContent; btn.innerHTML = '<span class="spin"></span> 合成中';
   $("synthInfo").textContent = "—";
   try {
+    const live = $("live").checked;
+    $("player").pause();
+    liveStop();
     const t0 = performance.now();
     const res = await fetch("/tts/stream?text=" + encodeURIComponent(text));
     if (!res.ok) throw new Error((await res.text()) || res.statusText);
     const sr = parseInt(res.headers.get("X-Sample-Rate") || "32000", 10);
     const reader = res.body.getReader();
+    const feed = live ? livePlayer(sr) : null;
     let first = null, total = 0;
     const parts = [];
     for (;;) {
@@ -456,6 +494,7 @@ async function synthesize() {
         $("ttfa").textContent = fmt(first, 0);
       }
       parts.push(value); total += value.length;
+      if (feed) feed(value);
     }
     const elapsed = (performance.now() - t0) / 1000;
     const pcm = new Uint8Array(total);
