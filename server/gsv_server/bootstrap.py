@@ -47,6 +47,10 @@ def setup() -> Path:
         )
 
     _use_local_nltk_data()
+    # PyTorch 的 cuDNN 計畫快取預設只留 10000 筆，SoVITS 解碼約 300 種音訊長度
+    # 就會開始互相擠掉。調大到不會擠掉為止（見 engine._plan_warmer）。
+    # 最壞情況（1500 個長度全出現過）約佔 4 GB 記憶體。使用者自己設的值優先。
+    os.environ.setdefault("TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT", "1000000")
     os.chdir(VENDOR_ROOT)
     for path in (VENDOR_ROOT / "GPT_SoVITS", VENDOR_ROOT):
         entry = str(path)

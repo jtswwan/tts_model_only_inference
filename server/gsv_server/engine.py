@@ -355,6 +355,13 @@ class _SvEmbCache:
 
         return wrapped
 
+    def peek(self, wav):
+        """查快取但不計入命中率。給背景預建用，免得把 /metrics 的數字灌水。"""
+        hit = self._data.get(id(wav))
+        if hit is not None and hit[0] is wav:
+            return hit[1].clone()
+        return None
+
     def stats(self) -> dict[str, Any]:
         total = self.hits + self.misses
         return {
@@ -402,11 +409,17 @@ class Engine:
         # 做，這樣所有碰到模型的動作從頭到尾都在同一條執行緒上。
         self._infer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gsv-infer")
         self._gc_frozen = False
+        # 背景預建 cuDNN 計畫（見 _plan_warmer）
+        self._plan_stop = threading.Event()
+        self._plan_thread: threading.Thread | None = None
+        self.vits_lengths_warmed = 0
+        self._waiting = 0
         try:
             self._on_infer_thread(self._load)
         except BaseException:
             self._infer.shutdown(wait=False)
             raise
+        self._start_plan_warmer()
 
     def _load(self) -> None:
         """載入模型、套上快取並暖機。在推論執行緒上執行。"""
@@ -554,6 +567,97 @@ class Engine:
         （固定 seed 實測：新建計畫與命中快取的音訊逐位元相同）。
         """
         return self._infer.submit(fn, *args).result()
+
+    # ---- 背景預建 cuDNN 計畫 ----
+
+    # 預建時用的音素數。計畫只跟張量形狀有關：跟 token 數有關的那批卷積每個
+    # 新長度要 ~65 ms，跟音素數有關的那批只要 ~6 ms，所以只掃 token 數。
+    _PLAN_WARM_PHONES = 20
+
+    def _start_plan_warmer(self) -> None:
+        n = self.settings.latency.warmup_vits_lengths
+        if n <= 0:
+            return
+        # 只有 cuDNN 才有這筆成本；v4 走 vocoder，是另一條解碼路徑。
+        if not str(self.config.device).startswith("cuda") or self.config.use_vocoder:
+            return
+        self._plan_thread = threading.Thread(
+            target=self._plan_warmer, args=(n,), name="gsv-plan-warm", daemon=True
+        )
+        self._plan_thread.start()
+
+    def _plan_warmer(self, max_tokens: int) -> None:
+        """就緒之後在背景把 SoVITS 各種長度的 cuDNN 計畫預先建好。
+
+        `_on_infer_thread()` 說明了為什麼沒見過的長度要多花 ~65 ms。取樣是
+        隨機的，同一句話每次生出的 token 數都略有不同，所以光靠「同一條
+        執行緒」只能省到重複出現的長度。這裡把 1..max_tokens 每個長度都
+        先解碼一次（輸入是全零的 token，結果丟掉），之後任何長度都是命中。
+
+        H200 實測：每個長度 ~100 ms、常駐記憶體 ~2.7 MB；600 個長度約一分鐘、
+        1.6 GB。所以放在背景做而不是擋住啟動 —— server 先就緒，前一分鐘內
+        還沒輪到的長度照舊付那 65 ms。
+
+        每一步都拿推論鎖，所以不會插進請求中間；有請求在等就先讓。請求最多
+        被一步（~100 ms）擋到，只發生在預建期間。
+
+        PyTorch 的計畫快取預設只留 10000 筆，裝不下這麼多長度（實測 300 個
+        長度就開始互相擠掉），所以 bootstrap 把
+        `TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT` 調大了。
+
+        不影響輸出：計畫是預建還是請求當下才建，選到的演算法相同（固定 seed
+        實測逐位元相同）。假解碼不改動模型的任何狀態；它會消耗 GPU 的亂數，
+        但每個請求一開始都會重新設 seed。
+        """
+        started = time.perf_counter()
+        for tokens in range(1, max_tokens + 1):
+            while self._waiting and not self._plan_stop.is_set():
+                time.sleep(0.01)
+            if self._plan_stop.is_set():
+                return
+            with self._lock:
+                if self._plan_stop.is_set():
+                    return
+                try:
+                    self._on_infer_thread(self._decode_dummy, tokens)
+                except Exception as exc:  # noqa: BLE001
+                    # 行程正在結束時推論執行緒已經收掉了，submit 會丟
+                    # RuntimeError。那不是錯誤，安靜離開。
+                    stopping = self._plan_stop.is_set() or (
+                        isinstance(exc, RuntimeError) and "shutdown" in str(exc)
+                    )
+                    if not stopping:
+                        log.exception("預建 cuDNN 計畫失敗（長度 %d），停止預建；不影響合成", tokens)
+                    return
+            self.vits_lengths_warmed = tokens
+        log.info(
+            "SoVITS 的 cuDNN 計畫預建完成：1..%d 個 token，花了 %.1f 秒",
+            max_tokens,
+            time.perf_counter() - started,
+        )
+
+    def _decode_dummy(self, tokens: int) -> None:
+        """用全零的輸入跑一次 SoVITS 解碼，只為了讓 cuDNN 把計畫建好。
+
+        呼叫方式照 `TTS.py` 裡 `return_fragment` 那條路徑（"vits并行推理
+        method 2"）：codes 是 (1, 1, T)，phones 是 (1, P)。
+        """
+        import torch
+
+        tts = self.tts
+        device = tts.configs.device
+        refer, sv_emb = [], ([] if tts.is_v2pro else None)
+        for spec, audio_tensor in tts.prompt_cache["refer_spec"]:
+            refer.append(spec.to(dtype=tts.precision, device=device))
+            if tts.is_v2pro:
+                emb = self.sv_cache.peek(audio_tensor)
+                if emb is None:
+                    emb = tts.sv_model.compute_embedding3(audio_tensor)
+                sv_emb.append(emb)
+        codes = torch.zeros((1, 1, tokens), dtype=torch.long, device=device)
+        phones = torch.zeros((1, self._PLAN_WARM_PHONES), dtype=torch.long, device=device)
+        with torch.no_grad():
+            tts.vits_model.decode(codes, phones, refer, speed=1.0, sv_emb=sv_emb)
 
     # ---- 暖機 ----
 
@@ -823,7 +927,11 @@ class Engine:
             if any(k == "zh2en" for k in kinds):
                 source = gaptrim.limit_stream(source, gap_ms, kinds)
 
-        with self._lock:
+        # 讓背景預建知道有請求在等，它會先讓（見 _plan_warmer）。
+        self._waiting += 1
+        self._lock.acquire()
+        self._waiting -= 1
+        try:
             start = time.perf_counter()
             first_at: float | None = None
             samples = 0
@@ -867,6 +975,8 @@ class Engine:
                         "profile": inputs.get("streaming_mode") and "low" or "quality",
                     }
                 )
+        finally:
+            self._lock.release()
 
     def release(self) -> None:
         """釋放模型佔用的記憶體。
@@ -874,6 +984,7 @@ class Engine:
         切換模型時要先釋放舊的再載入新的 —— 否則兩份模型會同時在 GPU 上，
         VRAM 短暫加倍。V100 上載第二份可能直接 OOM。
         """
+        self.stop_background()
         # 拿推論鎖：等進行中的請求整個結束再放模型，不要在它的兩段之間抽掉。
         with self._lock:
             # 推論執行緒連同它的 cuDNN 計畫快取一起結束。
@@ -895,6 +1006,17 @@ class Engine:
                 torch.cuda.empty_cache()
         except Exception:  # noqa: BLE001
             pass
+
+    def stop_background(self) -> None:
+        """叫背景預建停下來並等它離開（server 關閉時用）。不釋放模型。
+
+        要等：它是 daemon 執行緒，若行程結束時它還在 GPU 運算中途，
+        直譯器收尾會把它硬砍掉。一步最多 ~100 ms，所以等得起。
+        """
+        self._plan_stop.set()
+        thread = self._plan_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=10)
 
     def stop(self) -> None:
         """要求 upstream 在下一個檢查點中止目前的推論（TTS.stop）。"""
@@ -920,6 +1042,8 @@ class Engine:
             "total": summary(self._total),
             "text_cache": self.text_cache.stats(),
             "sv_cache": self.sv_cache.stats(),
+            # 背景預建到第幾個 token 長度了（見 _plan_warmer）；0 = 沒開或不適用
+            "vits_lengths_warmed": self.vits_lengths_warmed,
             "bert_trim": self.trim_stats or None,
             "model_load_seconds": round(self.load_seconds, 2),
             "uptime_seconds": round(time.time() - self.started_at, 1),

@@ -81,6 +81,10 @@ latency:
   # 暖機完凍結垃圾回收的掃描範圍。upstream 每個請求結尾都做一次完整回收，
   # 不凍結的話每次掃 200 萬個物件（H200 那台實測 300~800 ms，期間鎖不放）。
   freeze_gc: true
+  # 就緒後在背景預建 SoVITS 解碼 1..N 個 token 的 cuDNN 計畫（25 token = 1 秒
+  # 音訊）。沒預建的長度第一次出現要多花 ~65 ms。每個長度 ~100 ms、~2.7 MB
+  # 記憶體，600 個約一分鐘、1.6 GB。0 = 關閉。只在 GPU 上有作用。
+  warmup_vits_lengths: 600
 
 server:
   host: 0.0.0.0

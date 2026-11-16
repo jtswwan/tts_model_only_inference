@@ -123,6 +123,9 @@ async def lifespan(app: FastAPI):
     _state["engine"] = await asyncio.to_thread(Engine, settings)
     log.info("就緒：%s", _state["engine"].status())
     yield
+    eng = _state.get("engine")
+    if eng is not None:
+        eng.stop_background()
     _state["engine"] = None
 
 

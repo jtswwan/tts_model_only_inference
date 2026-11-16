@@ -127,6 +127,11 @@ class Latency:
     # 做一次完整回收，不凍結的話每次要掃 200 萬個物件（實測 300~800 ms）。
     # 不影響輸出。見 engine._freeze_gc()。
     freeze_gc: bool = True
+    # 就緒後在背景把 SoVITS 解碼 1..N 個 token 的 cuDNN 計畫預先建好，免得
+    # 每個沒見過的音訊長度都多花 ~65 ms。每個長度 ~100 ms、~2.7 MB 記憶體。
+    # 25 個 token = 1 秒音訊，600 = 單段 24 秒。0 = 關閉。只在 GPU 上有作用。
+    # 不影響輸出。見 engine._plan_warmer()。
+    warmup_vits_lengths: int = 600
 
 
 @dataclass
